@@ -1,7 +1,8 @@
 'use strict';
 
 const HELPER_SETTINGS_KEY = 'helperSettings';
-const EXPECTED_API_VERSION = '2';
+const DOWNLOAD_ENABLED_KEY = 'downloadEnabled';
+const EXPECTED_API_VERSION = '3';
 const HELPER_REQUEST_TIMEOUT_MS = 20_000;
 const DIRECTORY_PICKER_TIMEOUT_MS = 5 * 60_000;
 
@@ -66,6 +67,19 @@ function sanitizePageContext(context) {
   return sanitized;
 }
 
+function browserUserAgent() {
+  const value = String(globalThis.navigator?.userAgent || '').trim();
+  if (!value || value.length > 512 || /[\r\n\0]/.test(value)) {
+    return '';
+  }
+  return value;
+}
+
+async function isDownloadEnabled() {
+  const stored = await chrome.storage.local.get(DOWNLOAD_ENABLED_KEY);
+  return stored[DOWNLOAD_ENABLED_KEY] !== false;
+}
+
 async function getHelperSettings() {
   const stored = await chrome.storage.local.get(HELPER_SETTINGS_KEY);
   const settings = stored[HELPER_SETTINGS_KEY];
@@ -112,6 +126,24 @@ function localizedHelperError(error, responseStatus = 0) {
   }
   if (/open .* directory picker|native directory picker is not supported/i.test(message)) {
     return new Error('无法打开系统文件夹选择器，可以手动输入绝对路径');
+  }
+  if (/filename template must not be empty/i.test(message)) {
+    return new Error('文件命名模板不能为空');
+  }
+  if (/filename template must not contain path separators/i.test(message)) {
+    return new Error('文件命名模板不能包含路径分隔符');
+  }
+  if (/filename template must not exceed/i.test(message)) {
+    return new Error('文件命名模板不能超过 512 字节');
+  }
+  if (/concurrency must be between 1 and 4/i.test(message)) {
+    return new Error('下载并发数必须在 1–4 之间');
+  }
+  if (/retry count must be between 0 and 5/i.test(message)) {
+    return new Error('失败重试次数必须在 0–5 之间');
+  }
+  if (/browser user agent/i.test(message)) {
+    return new Error('浏览器 User-Agent 无效，请重新加载扩展');
   }
   return new Error(message || `Helper 请求失败${responseStatus ? `：HTTP ${responseStatus}` : ''}`);
 }
@@ -176,7 +208,11 @@ async function testAndSaveHelperSettings(message) {
 async function registerCandidate(masterUrl, context) {
   return helperRequest('/v1/candidates', {
     method: 'POST',
-    body: JSON.stringify({ masterUrl, context: sanitizePageContext(context) }),
+    body: JSON.stringify({
+      masterUrl,
+      userAgent: browserUserAgent(),
+      context: sanitizePageContext(context),
+    }),
   });
 }
 
@@ -203,9 +239,10 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       if (!isAllowedPage(sender.tab?.url)) {
         return false;
       }
-      operation = Promise.resolve()
-        .then(() => sanitizeCapture(message.capture))
+      operation = isDownloadEnabled()
+        .then((enabled) => enabled ? sanitizeCapture(message.capture) : null)
         .then(async (capture) => {
+          if (!capture) return { candidate: null, disabled: true };
           try {
             const candidate = await registerCandidate(capture.masterUrl, message.context);
             if (sender.tab?.id != null) {
@@ -221,8 +258,10 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       if (!isAllowedPage(sender.tab?.url)) {
         return false;
       }
-      operation = registerCandidate(message.masterUrl, message.context)
-        .then((candidate) => ({ candidate }));
+      operation = isDownloadEnabled().then((enabled) => {
+        if (!enabled) return { candidate: null, disabled: true };
+        return registerCandidate(message.masterUrl, message.context).then((candidate) => ({ candidate }));
+      });
       break;
     case 'helper-settings-get':
       operation = chrome.storage.local.get(HELPER_SETTINGS_KEY)
@@ -246,7 +285,12 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     case 'app-settings-update':
       operation = helperRequest('/v1/settings', {
         method: 'PUT',
-        body: JSON.stringify({ downloadDir: String(message.downloadDir || '') }),
+        body: JSON.stringify({
+          ...(typeof message.downloadDir === 'string' ? { downloadDir: message.downloadDir } : {}),
+          ...(typeof message.filenameTemplate === 'string' ? { filenameTemplate: message.filenameTemplate } : {}),
+          ...(Number.isInteger(message.concurrency) ? { concurrency: message.concurrency } : {}),
+          ...(Number.isInteger(message.retryCount) ? { retryCount: message.retryCount } : {}),
+        }),
       });
       break;
     case 'app-settings-pick-download-directory':
@@ -259,12 +303,16 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       operation = helperRequest('/v1/candidates');
       break;
     case 'job-create':
-      operation = helperRequest('/v1/jobs', {
-        method: 'POST',
-        body: JSON.stringify({
-          candidateId: message.candidateId,
-          variantId: message.variantId || '',
-        }),
+      operation = isDownloadEnabled().then((enabled) => {
+        if (!enabled) throw new Error('下载功能已关闭，请在设置中开启');
+        return helperRequest('/v1/jobs', {
+          method: 'POST',
+          body: JSON.stringify({
+            candidateId: message.candidateId,
+            variantId: message.variantId || '',
+            userAgent: browserUserAgent(),
+          }),
+        });
       });
       break;
     case 'job-list':

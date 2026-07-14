@@ -65,6 +65,7 @@ function renderStatus(status) {
   addCheck(`API 版本 ${status.apiVersion}`, true);
   addCheck(readiness.ffmpegReady ? `FFmpeg：${readiness.ffmpegPath}` : 'FFmpeg 不可用，请安装或检查路径', Boolean(readiness.ffmpegReady));
   addCheck(readiness.downloadDirWritable ? `下载目录：${readiness.downloadDir}` : '下载目录不可写', Boolean(readiness.downloadDirWritable));
+  addCheck(`下载并发：${readiness.concurrency || 1} · 失败重试：${readiness.retryCount || 0} 次`, true);
   addCheck(readiness.persistenceEnabled ? '任务与候选会在重启后恢复' : '状态持久化未启用', Boolean(readiness.persistenceEnabled));
   addCheck(readiness.proxyConfigured ? 'Helper 已检测到代理配置' : 'Helper 使用直连网络', true);
 }
@@ -75,8 +76,10 @@ function fileName(path) {
 
 function statusText(job) {
   switch (job.status) {
-    case 'queued': return '等待中';
-    case 'downloading': return `下载中 ${job.progress?.speed || ''}`.trim();
+  case 'queued': return job.attempt > 0 && job.maxAttempts > 1
+    ? `等待重试 ${job.attempt + 1}/${job.maxAttempts}`
+    : '等待中';
+  case 'downloading': return `下载中${job.maxAttempts > 1 ? ` ${job.attempt}/${job.maxAttempts}` : ''} ${job.progress?.speed || ''}`.trim();
     case 'completed': return '已完成';
     case 'failed': return '失败';
     case 'cancelled': return '已取消';

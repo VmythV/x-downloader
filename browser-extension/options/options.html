@@ -36,18 +36,66 @@
         </div>
       </section>
 
+    <section class="settings-section">
+      <div class="section-copy">
+        <h2>下载规则</h2>
+          <p>并发调整立即生效；命名模板和重试次数应用于之后创建的新任务。</p>
+      </div>
+      <div class="field-card rules-grid">
+        <label class="full-width">
+          文件命名模板
+            <input id="filename-template" type="text" maxlength="512" spellcheck="false">
+          <small class="field-help">支持 {date}、{author}、{postId}、{mediaIndex}、{mediaId}、{width}、{height}、{ext}</small>
+        </label>
+        <label>
+          同时下载
+          <select id="download-concurrency">
+            <option value="1">1 个任务</option>
+            <option value="2">2 个任务</option>
+            <option value="3">3 个任务</option>
+            <option value="4">4 个任务</option>
+          </select>
+        </label>
+        <label>
+          失败自动重试
+          <select id="retry-count">
+            <option value="0">不自动重试</option>
+            <option value="1">重试 1 次</option>
+            <option value="2">重试 2 次</option>
+            <option value="3">重试 3 次</option>
+            <option value="4">重试 4 次</option>
+            <option value="5">重试 5 次</option>
+          </select>
+        </label>
+        <div class="button-row full-width">
+          <button id="save-rules" type="button">保存下载规则</button>
+          <button id="reset-rules" type="button" class="text-button">恢复配置默认值</button>
+          <span id="rules-status" class="status-text" aria-live="polite"></span>
+        </div>
+      </div>
+    </section>
+
       <section class="settings-section">
         <div class="section-copy">
           <h2>浏览器行为</h2>
           <p>这些偏好只保存在当前浏览器扩展中。</p>
         </div>
-        <label class="toggle-card">
-          <input id="download-notifications" type="checkbox" checked>
-          <span>
-            <strong>下载结果通知</strong>
-            <small>下载完成或失败时显示浏览器通知</small>
-          </span>
-        </label>
+    <div class="toggle-list">
+      <label class="toggle-card">
+        <input id="download-enabled" type="checkbox" checked>
+        <span>
+          <strong>启用视频下载</strong>
+          <small>关闭后停止识别新视频并隐藏页面下载入口，不取消进行中的任务</small>
+        </span>
+      </label>
+      <label class="toggle-card">
+        <input id="download-notifications" type="checkbox" checked>
+        <span>
+          <strong>下载结果通知</strong>
+          <small>下载完成或失败时显示浏览器通知</small>
+        </span>
+      </label>
+    </div>
       </section>
 
       <section class="settings-section">
@@ -78,8 +126,6 @@
         </div>
         <div class="planned-grid">
           <article><strong>默认画质</strong><span>最高画质、指定分辨率或每次询问</span></article>
-          <article><strong>文件命名</strong><span>作者、日期、帖子 ID 和序号模板</span></article>
-          <article><strong>下载队列</strong><span>并发数、失败重试次数和任务保留量</span></article>
           <article><strong>完成后行为</strong><span>自动显示文件、清理历史或静默完成</span></article>
         </div>
       </section>

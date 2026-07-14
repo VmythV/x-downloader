@@ -3,6 +3,7 @@
 
   const EVENT_NAME = 'x-downloader:hls-master';
   const DISPLAY_MODE_KEY = 'mediaDisplayMode';
+  const DOWNLOAD_ENABLED_KEY = 'downloadEnabled';
   const MAX_CANDIDATES = 250;
   const MAX_JOBS = 500;
   const MAX_KNOWN_CAPTURES = 250;
@@ -28,6 +29,7 @@
   let jobPollTimer = null;
   let inlineRenderTimer = null;
   let displayMode = 'tray';
+  let downloadEnabled = false;
   let helperConnected = null;
   let helperConnectionError = '';
   let currentPageKey = trayCore.pageKey(location.href, location.href);
@@ -164,6 +166,7 @@
   }
 
   async function updateKnownContexts() {
+    if (!downloadEnabled) return;
     for (const [mediaId, capture] of knownCaptures) {
       const context = extractContext(mediaId);
       const pending = candidates.has(`pending-${mediaId}`);
@@ -310,6 +313,23 @@
     for (const groupKey of [...inlineControls.keys()]) {
       removeInlineControl(groupKey);
     }
+  }
+
+  function setDownloadEnabled(enabled) {
+    downloadEnabled = enabled;
+    if (!enabled) {
+      clearInlineControls();
+      removeFloatingPicker();
+      trayHost?.remove();
+      trayHost = null;
+      trayRoot = null;
+      cardContainer = null;
+      knownCaptures.clear();
+      contextSignatures.clear();
+      candidates.clear();
+      return;
+    }
+    renderTray();
   }
 
   function bestVariant(candidate) {
@@ -741,7 +761,7 @@
   }
 
   function scheduleInlineRender() {
-    if (displayMode !== 'inline' || inlineRenderTimer) {
+    if (!downloadEnabled || displayMode !== 'inline' || inlineRenderTimer) {
       return;
     }
     inlineRenderTimer = setTimeout(() => {
@@ -776,6 +796,10 @@
   }
 
   function renderTray() {
+    if (!downloadEnabled) {
+      clearInlineControls();
+      return;
+    }
     ensureTray();
     const visibleCandidates = candidatesForCurrentPage();
     const previousScrollTop = cardContainer.scrollTop;
@@ -949,8 +973,13 @@
       return '可以下载';
     }
     switch (job.status) {
-      case 'queued': return '等待下载';
-      case 'downloading': return `下载中 ${job.progress?.outTimeSeconds?.toFixed?.(1) || 0}s · ${job.progress?.speed || ''}`;
+    case 'queued': return job.attempt > 0 && job.maxAttempts > 1
+      ? `等待重试 · 下一次 ${job.attempt + 1}/${job.maxAttempts}`
+      : '等待下载';
+    case 'downloading': {
+      const attempt = job.maxAttempts > 1 ? ` · 第 ${job.attempt}/${job.maxAttempts} 次` : '';
+      return `下载中 ${job.progress?.outTimeSeconds?.toFixed?.(1) || 0}s · ${job.progress?.speed || ''}${attempt}`;
+    }
       case 'completed': return `已完成 · ${job.outputPath?.split('/').pop() || ''}`;
       case 'failed': return `失败 · ${localizedJobError(job.error)}`;
       case 'cancelled': return '已取消';
@@ -1197,6 +1226,9 @@
   document.addEventListener('click', () => closeInlinePickers());
 
   document.addEventListener(EVENT_NAME, async (event) => {
+    if (!downloadEnabled) {
+      return;
+    }
     if (typeof event.detail !== 'string' || event.detail.length > 256_000) {
       return;
     }
@@ -1259,14 +1291,20 @@
   window.addEventListener('pagehide', clearInlineControls);
   setInterval(syncCurrentPage, 1000);
 
-  chrome.storage.local.get(DISPLAY_MODE_KEY)
+  chrome.storage.onChanged.addListener((changes, areaName) => {
+    if (areaName === 'local' && changes[DOWNLOAD_ENABLED_KEY]) {
+      setDownloadEnabled(changes[DOWNLOAD_ENABLED_KEY].newValue !== false);
+    }
+  });
+
+  chrome.storage.local.get([DISPLAY_MODE_KEY, DOWNLOAD_ENABLED_KEY])
     .then((stored) => {
       if (['tray', 'inline'].includes(stored[DISPLAY_MODE_KEY])) {
         displayMode = stored[DISPLAY_MODE_KEY];
       }
-      renderTray();
+      setDownloadEnabled(stored[DOWNLOAD_ENABLED_KEY] !== false);
     })
-    .catch(() => {});
+    .catch(() => setDownloadEnabled(true));
   sendMessage({ type: 'job-list' })
     .then((items) => {
       syncJobs(items);

@@ -7,6 +7,13 @@ const elements = {
   saveDirectory: document.querySelector('#save-directory'),
   resetDirectory: document.querySelector('#reset-directory'),
   directoryStatus: document.querySelector('#directory-status'),
+  filenameTemplate: document.querySelector('#filename-template'),
+  concurrency: document.querySelector('#download-concurrency'),
+  retryCount: document.querySelector('#retry-count'),
+  saveRules: document.querySelector('#save-rules'),
+  resetRules: document.querySelector('#reset-rules'),
+  rulesStatus: document.querySelector('#rules-status'),
+  enabled: document.querySelector('#download-enabled'),
   notifications: document.querySelector('#download-notifications'),
   helperUrl: document.querySelector('#helper-url'),
   helperToken: document.querySelector('#helper-token'),
@@ -16,6 +23,9 @@ const elements = {
 };
 
 let defaultDownloadDir = '';
+let defaultFilenameTemplate = '';
+let defaultConcurrency = 1;
+let defaultRetryCount = 1;
 
 async function sendMessage(message) {
   const response = await chrome.runtime.sendMessage(message);
@@ -47,8 +57,16 @@ function renderDisconnected(message = '未连接') {
 function renderSettings(settings) {
   elements.downloadDir.value = settings.downloadDir || '';
   defaultDownloadDir = settings.defaultDownloadDir || settings.downloadDir || '';
+  elements.filenameTemplate.value = settings.filenameTemplate || '';
+  elements.concurrency.value = String(settings.concurrency || 1);
+  elements.retryCount.value = String(Number.isInteger(settings.retryCount) ? settings.retryCount : 1);
+  defaultFilenameTemplate = settings.defaultFilenameTemplate || settings.filenameTemplate || '';
+  defaultConcurrency = settings.defaultConcurrency || settings.concurrency || 1;
+  defaultRetryCount = Number.isInteger(settings.defaultRetryCount) ? settings.defaultRetryCount : (settings.retryCount || 0);
   elements.directoryStatus.textContent = '当前目录已保存，新任务会自动使用';
   elements.directoryStatus.className = 'status-text success';
+  elements.rulesStatus.textContent = '下载规则已保存';
+  elements.rulesStatus.className = 'status-text success';
 }
 
 async function refreshHelperSettings() {
@@ -64,11 +82,12 @@ async function load() {
   try {
     const [connection, preferences] = await Promise.all([
       sendMessage({ type: 'helper-settings-get' }),
-      chrome.storage.local.get('downloadNotifications'),
+      chrome.storage.local.get(['downloadNotifications', 'downloadEnabled']),
     ]);
     elements.helperUrl.value = connection.baseUrl;
     elements.helperToken.value = connection.token;
     elements.notifications.checked = preferences.downloadNotifications !== false;
+    elements.enabled.checked = preferences.downloadEnabled !== false;
     if (!connection.token) {
       renderDisconnected('请先填写 Helper 地址和配对令牌');
       return;
@@ -130,6 +149,40 @@ elements.resetDirectory.addEventListener('click', async () => {
   elements.saveDirectory.click();
 });
 
+for (const element of [elements.filenameTemplate, elements.concurrency, elements.retryCount]) {
+  element.addEventListener('input', () => {
+    elements.rulesStatus.textContent = '下载规则尚未保存';
+    elements.rulesStatus.className = 'status-text';
+  });
+}
+
+elements.saveRules.addEventListener('click', async () => {
+  showError('');
+  elements.saveRules.disabled = true;
+  elements.rulesStatus.textContent = '正在保存…';
+  try {
+    renderSettings(await sendMessage({
+      type: 'app-settings-update',
+      filenameTemplate: elements.filenameTemplate.value,
+      concurrency: Number(elements.concurrency.value),
+      retryCount: Number(elements.retryCount.value),
+    }));
+  } catch (error) {
+    showError(error);
+    elements.rulesStatus.textContent = '保存失败';
+    elements.rulesStatus.className = 'status-text';
+  } finally {
+    elements.saveRules.disabled = false;
+  }
+});
+
+elements.resetRules.addEventListener('click', () => {
+  elements.filenameTemplate.value = defaultFilenameTemplate;
+  elements.concurrency.value = String(defaultConcurrency);
+  elements.retryCount.value = String(defaultRetryCount);
+  elements.saveRules.click();
+});
+
 elements.saveConnection.addEventListener('click', async () => {
   showError('');
   elements.saveConnection.disabled = true;
@@ -152,6 +205,10 @@ elements.saveConnection.addEventListener('click', async () => {
 
 elements.notifications.addEventListener('change', () => {
   chrome.storage.local.set({ downloadNotifications: elements.notifications.checked }).catch(showError);
+});
+
+elements.enabled.addEventListener('change', () => {
+  chrome.storage.local.set({ downloadEnabled: elements.enabled.checked }).catch(showError);
 });
 
 load();
