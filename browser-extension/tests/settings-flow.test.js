@@ -21,11 +21,7 @@ function createBackgroundHarness(fetchImpl) {
   const local = {};
   const setCalls = [];
   const chrome = {
-    alarms: {
-      create: async () => {},
-      clear: async () => {},
-      onAlarm: { addListener: () => {} },
-    },
+    notifications: { create: async () => 'notification' },
     runtime: {
       onMessage: {
         addListener(listener) {
@@ -43,22 +39,16 @@ function createBackgroundHarness(fetchImpl) {
           setCalls.push(values);
         },
       },
-      session: {
-        async get() { return {}; },
-        async set() {},
-      },
     },
     tabs: {
       async get() { return { url: 'https://x.com/example/status/1' }; },
       sendMessage() { return Promise.resolve(); },
     },
-    webRequest: {
-      onBeforeRequest: { addListener: () => {} },
-    },
   };
   const source = fs.readFileSync(path.join(extensionRoot, 'src/background.js'), 'utf8');
   vm.runInNewContext(source, {
     URL,
+    AbortController,
     chrome,
     clearTimeout,
     fetch: fetchImpl,
@@ -77,13 +67,31 @@ function createBackgroundHarness(fetchImpl) {
 function createElement() {
   const listeners = {};
   return {
+    children: [],
+    className: '',
+    dataset: {},
     disabled: false,
     hidden: false,
     listeners,
+    open: false,
     textContent: '',
     value: '',
     addEventListener(type, listener) {
       listeners[type] = listener;
+    },
+    append(...items) {
+      this.children.push(...items);
+    },
+    appendChild(item) {
+      this.children.push(item);
+      return item;
+    },
+    replaceChildren(...items) {
+      this.children = items;
+    },
+    setAttribute() {},
+    get childElementCount() {
+      return this.children.length;
     },
   };
 }
@@ -92,11 +100,8 @@ test('保存并测试会校验 token 后持久化 helper 设置', async () => {
   const requests = [];
   const harness = createBackgroundHarness(async (url, options) => {
     requests.push({ url, options });
-    if (url.endsWith('/v1/health')) {
-      return jsonResponse(200, { status: 'ok', version: 'test' });
-    }
-    if (url.endsWith('/v1/candidates')) {
-      return jsonResponse(200, []);
+    if (url.endsWith('/v1/status')) {
+      return jsonResponse(200, { status: 'ready', version: 'test', apiVersion: '1' });
     }
     throw new Error(`unexpected URL: ${url}`);
   });
@@ -109,8 +114,8 @@ test('保存并测试会校验 token 后持久化 helper 设置', async () => {
   });
 
   assert.equal(response.ok, true);
-  assert.equal(requests.length, 2);
-  assert.equal(requests[1].options.headers.Authorization, `Bearer ${token}`);
+  assert.equal(requests.length, 1);
+  assert.equal(requests[0].options.headers.Authorization, `Bearer ${token}`);
   assert.deepEqual(JSON.parse(JSON.stringify(harness.local.helperSettings)), {
     baseUrl: 'http://127.0.0.1:17890',
     token,
@@ -119,9 +124,6 @@ test('保存并测试会校验 token 后持久化 helper 设置', async () => {
 
 test('配对令牌校验失败时不保存设置', async () => {
   const harness = createBackgroundHarness(async (url) => {
-    if (url.endsWith('/v1/health')) {
-      return jsonResponse(200, { status: 'ok', version: 'test' });
-    }
     return jsonResponse(401, { error: 'invalid bearer token' });
   });
 
@@ -140,6 +142,7 @@ test('弹窗的测试操作同时提交地址和 token 供保存', async () => {
   const elements = new Map();
   const messages = [];
   const document = {
+    createElement,
     querySelector(selector) {
       if (!elements.has(selector)) {
         elements.set(selector, createElement());
@@ -158,12 +161,30 @@ test('弹窗的测试操作同时提交地址和 token 供保存', async () => {
           return { ok: true, result: null };
         }
         if (message.type === 'helper-settings-test-and-save') {
-          return { ok: true, result: { status: 'ok', version: 'test' } };
+          return {
+            ok: true,
+            result: {
+              status: 'ready', version: 'test', apiVersion: '1', candidateCount: 0,
+              jobs: {},
+              readiness: {
+                ffmpegReady: true, ffmpegPath: 'ffmpeg', downloadDir: '/tmp',
+                downloadDirWritable: true, persistenceEnabled: true, proxyConfigured: false,
+              },
+            },
+          };
+        }
+        if (message.type === 'job-list') {
+          return { ok: true, result: [] };
         }
         throw new Error(`unexpected message: ${message.type}`);
       },
     },
-    tabs: { query: async () => [] },
+    storage: {
+      local: {
+        get: async () => ({}),
+        set: async () => {},
+      },
+    },
   };
   const source = fs.readFileSync(path.join(extensionRoot, 'popup/popup.js'), 'utf8');
   vm.runInNewContext(source, { chrome, clearTimeout, document, setTimeout });
@@ -173,10 +194,11 @@ test('弹窗的测试操作同时提交地址和 token 供保存', async () => {
   elements.get('#helper-token').value = 'c'.repeat(32);
   await elements.get('#test-helper').listeners.click();
 
-  assert.deepEqual(JSON.parse(JSON.stringify(messages.at(-1))), {
+  const submitted = messages.find((message) => message.type === 'helper-settings-test-and-save');
+  assert.deepEqual(JSON.parse(JSON.stringify(submitted)), {
     type: 'helper-settings-test-and-save',
     baseUrl: 'http://127.0.0.1:17890',
     token: 'c'.repeat(32),
   });
-  assert.equal(elements.get('#connection-status').textContent, '已保存 · 正常 · test');
+  assert.equal(elements.get('#connection-status').textContent, '已保存');
 });

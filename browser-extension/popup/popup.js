@@ -1,22 +1,23 @@
 'use strict';
 
 const elements = {
+  badge: document.querySelector('#connection-badge'),
+  readinessTitle: document.querySelector('#readiness-title'),
+  readinessSummary: document.querySelector('#readiness-summary'),
+  readinessList: document.querySelector('#readiness-list'),
+  refresh: document.querySelector('#refresh'),
+  settings: document.querySelector('#connection-settings'),
   helperUrl: document.querySelector('#helper-url'),
   helperToken: document.querySelector('#helper-token'),
-  duration: document.querySelector('#duration'),
   testHelper: document.querySelector('#test-helper'),
   connectionStatus: document.querySelector('#connection-status'),
-  start: document.querySelector('#start'),
-  finish: document.querySelector('#finish'),
-  statusTitle: document.querySelector('#status-title'),
-  statusDetails: document.querySelector('#status-details'),
-  reportSection: document.querySelector('#report-section'),
-  reportSummary: document.querySelector('#report-summary'),
-  reportJson: document.querySelector('#report-json'),
+  notifications: document.querySelector('#download-notifications'),
+  historySummary: document.querySelector('#history-summary'),
+  jobList: document.querySelector('#job-list'),
   error: document.querySelector('#error'),
 };
 
-let pollTimer = null;
+let latestJobs = [];
 
 async function sendMessage(message) {
   const response = await chrome.runtime.sendMessage(message);
@@ -30,104 +31,198 @@ function showError(error) {
   elements.error.textContent = error?.message || String(error || '');
 }
 
-function renderState(state) {
-  const active = state?.status === 'active';
-  elements.start.disabled = active;
-  elements.finish.disabled = !active;
+function addCheck(text, ok) {
+  const item = document.createElement('li');
+  if (!ok) item.className = 'problem';
+  const mark = document.createElement('span');
+  mark.className = 'mark';
+  mark.textContent = ok ? '✓' : '!';
+  const label = document.createElement('span');
+  label.textContent = text;
+  item.append(mark, label);
+  elements.readinessList.appendChild(item);
+}
 
-  if (!state) {
-    elements.statusTitle.textContent = '尚未运行';
-    elements.statusDetails.textContent = '在 X 页面播放视频后启动诊断。';
-    return;
-  }
+function renderDisconnected(message) {
+  elements.badge.className = 'badge offline';
+  elements.badge.textContent = '未连接';
+  elements.readinessTitle.textContent = 'Helper 不可用';
+  elements.readinessSummary.textContent = message || '请启动 Helper 并检查连接设置';
+  elements.readinessList.replaceChildren();
+  addCheck('Helper 连接', false);
+}
 
-  if (active) {
-    const remaining = Math.max(0, Math.ceil((state.endsAt - Date.now()) / 1000));
-    elements.statusTitle.textContent = `正在捕获，还剩 ${remaining} 秒`;
-    elements.statusDetails.textContent = `观察 ${state.observationCount || 0} 次，唯一 playlist ${state.uniquePlaylistCount || 0} 个${state.lastError ? `；${state.lastError}` : ''}`;
-    schedulePoll();
-  } else if (state.status === 'finished') {
-    elements.statusTitle.textContent = '诊断完成';
-    elements.statusDetails.textContent = `观察 ${state.report?.observationCount || 0} 次，唯一 playlist ${state.report?.uniquePlaylistCount || 0} 个`;
-    renderReport(state.report);
+function renderStatus(status) {
+  const readiness = status.readiness || {};
+  const ready = status.status === 'ready';
+  elements.badge.className = `badge ${ready ? 'ready' : 'degraded'}`;
+  elements.badge.textContent = ready ? '可以下载' : '需要处理';
+  elements.readinessTitle.textContent = ready ? '下载环境已就绪' : '下载环境未完全就绪';
+  const active = (status.jobs?.queued || 0) + (status.jobs?.downloading || 0);
+  elements.readinessSummary.textContent = `Helper ${status.version} · ${active} 个活动任务 · ${status.candidateCount || 0} 个候选`;
+  elements.readinessList.replaceChildren();
+  addCheck(`API 版本 ${status.apiVersion}`, true);
+  addCheck(readiness.ffmpegReady ? `FFmpeg：${readiness.ffmpegPath}` : 'FFmpeg 不可用，请安装或检查路径', Boolean(readiness.ffmpegReady));
+  addCheck(readiness.downloadDirWritable ? `下载目录：${readiness.downloadDir}` : '下载目录不可写', Boolean(readiness.downloadDirWritable));
+  addCheck(readiness.persistenceEnabled ? '任务与候选会在重启后恢复' : '状态持久化未启用', Boolean(readiness.persistenceEnabled));
+  addCheck(readiness.proxyConfigured ? 'Helper 已检测到代理配置' : 'Helper 使用直连网络', true);
+}
+
+function fileName(path) {
+  return String(path || '').split(/[\\/]/).pop() || 'X 视频';
+}
+
+function statusText(job) {
+  switch (job.status) {
+    case 'queued': return '等待中';
+    case 'downloading': return `下载中 ${job.progress?.speed || ''}`.trim();
+    case 'completed': return '已完成';
+    case 'failed': return '失败';
+    case 'cancelled': return '已取消';
+    default: return job.status || '未知';
   }
 }
 
-function renderReport(report) {
-  if (!report) {
-    return;
-  }
-  elements.reportSection.hidden = false;
-  const mediaCount = Array.isArray(report.media) ? report.media.length : 0;
-  elements.reportSummary.textContent = `Master：${report.masterDetected ? '已发现' : '未发现'}；媒体 ID：${mediaCount} 个；探测失败：${report.failedProbeCount || 0} 个。`;
-  elements.reportJson.textContent = JSON.stringify(report, null, 2);
+function jobButton(label, action, jobId, secondary = false) {
+  const button = document.createElement('button');
+  button.type = 'button';
+  button.textContent = label;
+  button.dataset.action = action;
+  button.dataset.jobId = jobId;
+  if (secondary) button.className = 'secondary';
+  return button;
 }
 
-function schedulePoll() {
-  clearTimeout(pollTimer);
-  pollTimer = setTimeout(async () => {
-    try {
-      renderState(await sendMessage({ type: 'diagnostic-status' }));
-    } catch (error) {
-      showError(error);
+function renderJobs(jobs) {
+  latestJobs = [...jobs].sort((left, right) => Date.parse(right.createdAt) - Date.parse(left.createdAt));
+  elements.jobList.replaceChildren();
+  const active = latestJobs.filter((job) => ['queued', 'downloading'].includes(job.status)).length;
+  const completed = latestJobs.filter((job) => job.status === 'completed').length;
+  elements.historySummary.textContent = `${active} 个活动 · ${completed} 个已完成`;
+  if (latestJobs.length === 0) {
+    const empty = document.createElement('div');
+    empty.className = 'empty';
+    empty.textContent = '还没有下载任务';
+    elements.jobList.appendChild(empty);
+    return;
+  }
+  for (const job of latestJobs.slice(0, 20)) {
+    const row = document.createElement('article');
+    row.className = 'job';
+    const main = document.createElement('div');
+    main.className = 'job-main';
+    const name = document.createElement('span');
+    name.className = 'job-name';
+    name.textContent = fileName(job.outputPath) || `视频 ${job.mediaId}`;
+    const status = document.createElement('span');
+    status.className = `job-status ${job.status}`;
+    status.textContent = statusText(job);
+    main.append(name, status);
+    row.appendChild(main);
+    const detail = document.createElement('div');
+    detail.className = 'job-detail';
+    detail.textContent = job.error || `${job.width || '?'}×${job.height || '?'} · ${new Date(job.createdAt).toLocaleString()}`;
+    detail.title = detail.textContent;
+    row.appendChild(detail);
+    const actions = document.createElement('div');
+    actions.className = 'job-actions';
+    if (job.status === 'completed') {
+      actions.appendChild(jobButton('显示文件', 'reveal', job.id, true));
+    } else if (['failed', 'cancelled'].includes(job.status)) {
+      actions.appendChild(jobButton('重新下载', 'retry', job.id));
+    } else if (['queued', 'downloading'].includes(job.status)) {
+      actions.appendChild(jobButton('取消', 'cancel', job.id, true));
     }
-  }, 1000);
+    if (actions.childElementCount) row.appendChild(actions);
+    elements.jobList.appendChild(row);
+  }
+}
+
+async function refreshAll() {
+  showError('');
+  elements.refresh.disabled = true;
+  try {
+    const status = await sendMessage({ type: 'helper-status' });
+    renderStatus(status);
+    renderJobs(await sendMessage({ type: 'job-list' }));
+  } catch (error) {
+    renderDisconnected(error.message);
+    showError(error);
+  } finally {
+    elements.refresh.disabled = false;
+  }
 }
 
 async function load() {
   try {
-    const settings = await sendMessage({ type: 'helper-settings-get' });
+    const [settings, preferences] = await Promise.all([
+      sendMessage({ type: 'helper-settings-get' }),
+      chrome.storage.local.get('downloadNotifications'),
+    ]);
     elements.helperUrl.value = settings.baseUrl;
     elements.helperToken.value = settings.token;
-    renderState(await sendMessage({ type: 'diagnostic-status' }));
+    elements.notifications.checked = preferences.downloadNotifications !== false;
+    if (!settings.token) {
+      elements.settings.open = true;
+      renderDisconnected('请填写 Helper 地址和配对令牌');
+      return;
+    }
+    await refreshAll();
   } catch (error) {
+    renderDisconnected(error.message);
     showError(error);
   }
 }
 
+elements.refresh.addEventListener('click', refreshAll);
+
 elements.testHelper.addEventListener('click', async () => {
   showError('');
-  elements.connectionStatus.textContent = '连接中…';
+  elements.testHelper.disabled = true;
+  elements.connectionStatus.textContent = '检查中…';
   try {
-    const health = await sendMessage({
+    const status = await sendMessage({
       type: 'helper-settings-test-and-save',
       baseUrl: elements.helperUrl.value,
       token: elements.helperToken.value,
     });
-    elements.connectionStatus.textContent = `已保存 · 正常 · ${health.version}`;
+    elements.connectionStatus.textContent = '已保存';
+    renderStatus(status);
+    renderJobs(await sendMessage({ type: 'job-list' }));
   } catch (error) {
     elements.connectionStatus.textContent = '连接失败';
+    renderDisconnected(error.message);
     showError(error);
+  } finally {
+    elements.testHelper.disabled = false;
   }
 });
 
-elements.start.addEventListener('click', async () => {
-  showError('');
-  elements.reportSection.hidden = true;
-  try {
-    await sendMessage({
-      type: 'helper-settings-save',
-      baseUrl: elements.helperUrl.value,
-      token: elements.helperToken.value,
-    });
-    const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
-    const state = await sendMessage({
-      type: 'diagnostic-start',
-      tabId: tab?.id,
-      durationSeconds: Number(elements.duration.value),
-    });
-    renderState(state);
-  } catch (error) {
-    showError(error);
-  }
+elements.notifications.addEventListener('change', () => {
+  chrome.storage.local.set({ downloadNotifications: elements.notifications.checked }).catch(() => {});
 });
 
-elements.finish.addEventListener('click', async () => {
+elements.jobList.addEventListener('click', async (event) => {
+  const button = event.target.closest?.('button[data-action]');
+  if (!button) return;
+  const job = latestJobs.find((item) => item.id === button.dataset.jobId);
+  if (!job) return;
+  button.disabled = true;
   showError('');
   try {
-    renderState(await sendMessage({ type: 'diagnostic-finish' }));
+    if (button.dataset.action === 'reveal') {
+      await sendMessage({ type: 'job-reveal', jobId: job.id });
+    } else if (button.dataset.action === 'retry') {
+      await sendMessage({ type: 'job-create', candidateId: job.candidateId, variantId: job.variantId });
+      await refreshAll();
+    } else if (button.dataset.action === 'cancel') {
+      await sendMessage({ type: 'job-cancel', jobId: job.id });
+      await refreshAll();
+    }
   } catch (error) {
     showError(error);
+  } finally {
+    button.disabled = false;
   }
 });
 

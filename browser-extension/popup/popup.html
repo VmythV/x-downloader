@@ -3,55 +3,65 @@
   <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>X Downloader 诊断</title>
+    <title>X Downloader</title>
     <link rel="stylesheet" href="popup.css">
   </head>
   <body>
     <main>
-      <h1>X Downloader</h1>
-      <p class="subtitle">HLS 捕获诊断</p>
+      <header class="app-header">
+        <div>
+          <h1>X Downloader</h1>
+          <p>本地、私密地保存 X 视频</p>
+        </div>
+        <span id="connection-badge" class="badge offline">未连接</span>
+      </header>
 
-      <label>
-        Helper 地址
-        <input id="helper-url" type="url" value="http://127.0.0.1:17890" spellcheck="false">
-      </label>
-
-      <label>
-        配对令牌
-        <input id="helper-token" type="password" autocomplete="off" spellcheck="false">
-      </label>
-
-      <div class="row">
-        <button id="test-helper" type="button" class="secondary">保存并测试</button>
-        <span id="connection-status" class="muted"></span>
-      </div>
-
-      <hr>
-
-      <label>
-        诊断时长（秒）
-        <input id="duration" type="number" value="15" min="5" max="120">
-      </label>
-
-      <div class="row actions">
-        <button id="start" type="button">开始诊断</button>
-        <button id="finish" type="button" class="secondary" disabled>提前结束</button>
-      </div>
-
-      <section id="status-card" class="status-card">
-        <strong id="status-title">尚未运行</strong>
-        <div id="status-details" class="muted">在 X 页面播放视频后启动诊断。</div>
+      <section class="readiness-card" aria-live="polite">
+        <div class="section-heading">
+          <div>
+            <strong id="readiness-title">正在检查 Helper…</strong>
+            <div id="readiness-summary" class="muted">请稍候</div>
+          </div>
+          <button id="refresh" class="icon-button" type="button" title="刷新状态" aria-label="刷新状态">↻</button>
+        </div>
+        <ul id="readiness-list" class="check-list"></ul>
       </section>
 
-      <section id="report-section" hidden>
-        <h2>诊断结果</h2>
-        <div id="report-summary"></div>
-        <details>
-          <summary>查看完整报告</summary>
-          <pre id="report-json"></pre>
-        </details>
+      <details id="connection-settings" class="settings-card">
+        <summary>连接设置</summary>
+        <label>
+          Helper 地址
+          <input id="helper-url" type="url" value="http://127.0.0.1:17890" spellcheck="false">
+        </label>
+        <label>
+          配对令牌
+          <input id="helper-token" type="password" autocomplete="off" spellcheck="false">
+        </label>
+        <div class="settings-action">
+          <button id="test-helper" type="button">保存并检查</button>
+          <span id="connection-status" class="muted"></span>
+        </div>
+      </details>
+
+      <label class="toggle-row">
+        <input id="download-notifications" type="checkbox" checked>
+        <span>
+          <strong>下载完成通知</strong>
+          <small>完成或失败时显示浏览器通知</small>
+        </span>
+      </label>
+
+      <section class="history-section">
+        <div class="section-heading">
+          <div>
+            <h2>最近任务</h2>
+            <div id="history-summary" class="muted">暂无任务</div>
+          </div>
+        </div>
+        <div id="job-list" class="job-list"></div>
       </section>
 
+      <p class="usage-tip">打开 X 并播放视频，帖子操作栏会出现下载按钮；多视频帖子需要逐个切换播放才能全部识别。</p>
       <p id="error" class="error" role="alert"></p>
     </main>
     <script src="popup.js"></script>
