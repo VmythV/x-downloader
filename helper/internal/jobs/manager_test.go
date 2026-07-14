@@ -57,3 +57,37 @@ func TestManagerDownloadsAndNamesCandidate(t *testing.T) {
 		t.Fatalf("unexpected output filename: %s", job.OutputPath)
 	}
 }
+
+func TestPersistentManagerRestoresCompletedHistory(t *testing.T) {
+	audio := &hls.Audio{URL: "https://video.twimg.com/audio.m3u8"}
+	candidate := media.Candidate{
+		ID: "media-123", MediaID: "123",
+		Variants: []hls.Variant{{ID: "highest", URL: "https://video.twimg.com/video.m3u8", Width: 1280, Height: 720, Audio: audio}},
+	}
+	root := t.TempDir()
+	statePath := filepath.Join(root, "state", "jobs.json")
+	manager, err := NewPersistentManager(1, filepath.Join(root, "downloads"), filepath.Join(root, "temp"), "{mediaId}_{height}p.{ext}", statePath, 10, fakeCandidates{candidate}, fakeRunner{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	job, err := manager.Submit(candidate.ID, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		job, _ = manager.Get(job.ID)
+		if job.Status == "completed" {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	restored, err := NewPersistentManager(1, filepath.Join(root, "downloads"), filepath.Join(root, "temp"), "{mediaId}_{height}p.{ext}", statePath, 10, fakeCandidates{candidate}, fakeRunner{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	items := restored.List()
+	if len(items) != 1 || items[0].Status != "completed" {
+		t.Fatalf("unexpected restored jobs: %+v", items)
+	}
+}

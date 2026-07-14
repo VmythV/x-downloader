@@ -3,6 +3,7 @@
   "downloadDir": "~/Downloads/X-Media",
   "tempDir": "~/Downloads/X-Media/.partial",
   "diagnosticsDir": "~/Library/Application Support/x-downloader/diagnostics",
+  "stateDir": "~/Library/Application Support/x-downloader/state",
   "tokenFile": "~/Library/Application Support/x-downloader/token",
   "ffmpegPath": "ffmpeg",
   "concurrency": 1,

@@ -73,6 +73,22 @@ func TestHealth(t *testing.T) {
 	}
 }
 
+func TestStatusReportsAuthenticatedReadiness(t *testing.T) {
+	handler := newTestHandler(t)
+	unauthorized := httptest.NewRecorder()
+	handler.ServeHTTP(unauthorized, httptest.NewRequest(http.MethodGet, "/v1/status", nil))
+	if unauthorized.Code != http.StatusUnauthorized {
+		t.Fatalf("unexpected unauthenticated status: %d", unauthorized.Code)
+	}
+	request := httptest.NewRequest(http.MethodGet, "/v1/status", nil)
+	request.Header.Set("Authorization", "Bearer test-secret-token-value-1234567890")
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `"apiVersion":"1"`) {
+		t.Fatalf("unexpected status response: %d %s", response.Code, response.Body.String())
+	}
+}
+
 func TestCaptureEndpointsRequireToken(t *testing.T) {
 	request := httptest.NewRequest(http.MethodPost, "/v1/capture-sessions", nil)
 	response := httptest.NewRecorder()

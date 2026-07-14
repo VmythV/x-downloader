@@ -17,9 +17,11 @@ import (
 	"time"
 
 	"x-downloader/helper/internal/hls"
+	"x-downloader/helper/internal/statefile"
 )
 
 const maxMasterBytes = 2 << 20
+const defaultMaxCandidates = 300
 
 var numericID = regexp.MustCompile(`^\d+$`)
 
@@ -45,12 +47,46 @@ type Candidate struct {
 }
 
 type Store struct {
-	mu         sync.RWMutex
-	candidates map[string]Candidate
-	client     *http.Client
+	mu            sync.RWMutex
+	persistMu     sync.Mutex
+	candidates    map[string]Candidate
+	client        *http.Client
+	stateFile     string
+	maxCandidates int
+}
+
+type persistedState struct {
+	Version    int         `json:"version"`
+	Candidates []Candidate `json:"candidates"`
 }
 
 func NewStore(client *http.Client) *Store {
+	return newStore(client, "", defaultMaxCandidates)
+}
+
+func NewPersistentStore(stateFile string, maxCandidates int, client *http.Client) (*Store, error) {
+	if maxCandidates <= 0 {
+		maxCandidates = defaultMaxCandidates
+	}
+	store := newStore(client, stateFile, maxCandidates)
+	var saved persistedState
+	if err := statefile.Read(stateFile, &saved); err != nil {
+		return nil, fmt.Errorf("load media state: %w", err)
+	}
+	if saved.Version != 0 && saved.Version != 1 {
+		return nil, fmt.Errorf("unsupported media state version %d", saved.Version)
+	}
+	for _, candidate := range saved.Candidates {
+		if candidate.ID == "" || candidate.MediaID == "" {
+			continue
+		}
+		store.candidates[candidate.ID] = candidate
+	}
+	store.pruneLocked()
+	return store, nil
+}
+
+func newStore(client *http.Client, stateFile string, maxCandidates int) *Store {
 	if client == nil {
 		client = &http.Client{
 			Timeout: 15 * time.Second,
@@ -60,7 +96,12 @@ func NewStore(client *http.Client) *Store {
 			},
 		}
 	}
-	return &Store{candidates: make(map[string]Candidate), client: client}
+	return &Store{
+		candidates:    make(map[string]Candidate),
+		client:        client,
+		stateFile:     stateFile,
+		maxCandidates: maxCandidates,
+	}
 }
 
 func (store *Store) Register(ctx context.Context, masterURL string, pageContext Context) (Candidate, error) {
@@ -83,6 +124,9 @@ func (store *Store) Register(ctx context.Context, masterURL string, pageContext 
 		existing.Context = mergeContext(existing.Context, cleanContext)
 		store.candidates[id] = existing
 		store.mu.Unlock()
+		if err := store.persist(); err != nil {
+			return Candidate{}, err
+		}
 		slog.Debug("media candidate context updated", "candidateId", id, "mediaId", mediaID, "postId", existing.Context.PostID)
 		return existing, nil
 	}
@@ -127,7 +171,11 @@ func (store *Store) Register(ctx context.Context, masterURL string, pageContext 
 		candidate.Context = mergeContext(existing.Context, candidate.Context)
 	}
 	store.candidates[id] = candidate
+	store.pruneLocked()
 	store.mu.Unlock()
+	if err := store.persist(); err != nil {
+		return Candidate{}, err
+	}
 	slog.Info("media candidate ready",
 		"candidateId", candidate.ID,
 		"mediaId", candidate.MediaID,
@@ -157,6 +205,39 @@ func (store *Store) List() []Candidate {
 	}
 	sort.Slice(result, func(i, j int) bool { return result[i].DiscoveredAt.After(result[j].DiscoveredAt) })
 	return result
+}
+
+func (store *Store) Count() int {
+	store.mu.RLock()
+	defer store.mu.RUnlock()
+	return len(store.candidates)
+}
+
+func (store *Store) pruneLocked() {
+	if store.maxCandidates <= 0 || len(store.candidates) <= store.maxCandidates {
+		return
+	}
+	items := make([]Candidate, 0, len(store.candidates))
+	for _, candidate := range store.candidates {
+		items = append(items, candidate)
+	}
+	sort.Slice(items, func(i, j int) bool { return items[i].DiscoveredAt.Before(items[j].DiscoveredAt) })
+	for index := 0; index < len(items)-store.maxCandidates; index++ {
+		delete(store.candidates, items[index].ID)
+	}
+}
+
+func (store *Store) persist() error {
+	if store.stateFile == "" {
+		return nil
+	}
+	store.persistMu.Lock()
+	defer store.persistMu.Unlock()
+	state := persistedState{Version: 1, Candidates: store.List()}
+	if err := statefile.Write(store.stateFile, state); err != nil {
+		return fmt.Errorf("persist media state: %w", err)
+	}
+	return nil
 }
 
 func validateContext(input Context, mediaID string) (Context, error) {

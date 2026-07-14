@@ -19,7 +19,10 @@ import (
 
 	"x-downloader/helper/internal/hls"
 	"x-downloader/helper/internal/media"
+	"x-downloader/helper/internal/statefile"
 )
+
+const defaultMaxJobs = 500
 
 type CandidateSource interface {
 	Get(id string) (media.Candidate, error)
@@ -71,6 +74,7 @@ type jobState struct {
 
 type Manager struct {
 	mu               sync.RWMutex
+	persistMu        sync.Mutex
 	jobs             map[string]*jobState
 	bySelection      map[string]string
 	queue            chan string
@@ -79,9 +83,34 @@ type Manager struct {
 	downloadDir      string
 	tempDir          string
 	filenameTemplate string
+	stateFile        string
+	maxJobs          int
+}
+
+type persistedJob struct {
+	Job       Job             `json:"job"`
+	Candidate media.Candidate `json:"candidate"`
+	Variant   hls.Variant     `json:"variant"`
+	TempPath  string          `json:"tempPath"`
+}
+
+type persistedState struct {
+	Version int            `json:"version"`
+	Jobs    []persistedJob `json:"jobs"`
 }
 
 func NewManager(concurrency int, downloadDir, tempDir, filenameTemplate string, candidates CandidateSource, runner Runner) (*Manager, error) {
+	return newManager(concurrency, downloadDir, tempDir, filenameTemplate, "", defaultMaxJobs, candidates, runner)
+}
+
+func NewPersistentManager(concurrency int, downloadDir, tempDir, filenameTemplate, stateFile string, maxJobs int, candidates CandidateSource, runner Runner) (*Manager, error) {
+	if maxJobs <= 0 {
+		maxJobs = defaultMaxJobs
+	}
+	return newManager(concurrency, downloadDir, tempDir, filenameTemplate, stateFile, maxJobs, candidates, runner)
+}
+
+func newManager(concurrency int, downloadDir, tempDir, filenameTemplate, stateFile string, maxJobs int, candidates CandidateSource, runner Runner) (*Manager, error) {
 	if concurrency < 1 || concurrency > 4 {
 		return nil, errors.New("job concurrency must be between 1 and 4")
 	}
@@ -103,11 +132,56 @@ func NewManager(concurrency int, downloadDir, tempDir, filenameTemplate string, 
 		downloadDir:      downloadDir,
 		tempDir:          tempDir,
 		filenameTemplate: filenameTemplate,
+		stateFile:        stateFile,
+		maxJobs:          maxJobs,
+	}
+	if err := manager.restore(); err != nil {
+		return nil, err
 	}
 	for range concurrency {
 		go manager.worker()
 	}
 	return manager, nil
+}
+
+func (manager *Manager) restore() error {
+	if manager.stateFile == "" {
+		return nil
+	}
+	var saved persistedState
+	if err := statefile.Read(manager.stateFile, &saved); err != nil {
+		return fmt.Errorf("load job state: %w", err)
+	}
+	if saved.Version != 0 && saved.Version != 1 {
+		return fmt.Errorf("unsupported job state version %d", saved.Version)
+	}
+	recovered := false
+	for _, item := range saved.Jobs {
+		if item.Job.ID == "" || item.Job.CandidateID == "" || item.Variant.ID == "" {
+			continue
+		}
+		if item.Job.Status == "queued" || item.Job.Status == "downloading" {
+			now := time.Now().UTC()
+			item.Job.Status = "failed"
+			item.Job.Error = "download interrupted because helper restarted"
+			item.Job.FinishedAt = &now
+			_ = os.Remove(item.TempPath)
+			recovered = true
+		}
+		manager.jobs[item.Job.ID] = &jobState{
+			job: item.Job, candidate: item.Candidate, variant: item.Variant, tempPath: item.TempPath,
+		}
+		selectionKey := item.Job.CandidateID + "|" + item.Job.VariantID
+		existingID := manager.bySelection[selectionKey]
+		if existingID == "" || manager.jobs[existingID].job.CreatedAt.Before(item.Job.CreatedAt) {
+			manager.bySelection[selectionKey] = item.Job.ID
+		}
+	}
+	manager.pruneLocked()
+	if recovered {
+		manager.persistBestEffort()
+	}
+	return nil
 }
 
 func (manager *Manager) Submit(candidateID, variantID string) (Job, error) {
@@ -166,6 +240,7 @@ func (manager *Manager) Submit(candidateID, variantID string) (Job, error) {
 	}
 	manager.jobs[id] = state
 	manager.bySelection[selectionKey] = id
+	manager.pruneLocked()
 	job := state.job
 	manager.mu.Unlock()
 
@@ -180,12 +255,14 @@ func (manager *Manager) Submit(candidateID, variantID string) (Job, error) {
 				delete(manager.bySelection, selectionKey)
 			}
 			manager.mu.Unlock()
+			manager.persistBestEffort()
 			slog.Warn("download queue full", "candidateId", candidate.ID, "variantId", variant.ID)
 			return Job{}, ErrQueueFull
 		}
 	} else {
 		slog.Info("download output already exists", "jobId", job.ID, "outputPath", job.OutputPath)
 	}
+	manager.persistBestEffort()
 	return job, nil
 }
 
@@ -210,6 +287,69 @@ func (manager *Manager) List() []Job {
 	return result
 }
 
+func (manager *Manager) Stats() map[string]int {
+	manager.mu.RLock()
+	defer manager.mu.RUnlock()
+	result := map[string]int{"total": len(manager.jobs)}
+	for _, state := range manager.jobs {
+		result[state.job.Status]++
+	}
+	return result
+}
+
+func (manager *Manager) pruneLocked() {
+	if manager.maxJobs <= 0 || len(manager.jobs) <= manager.maxJobs {
+		return
+	}
+	terminal := make([]*jobState, 0, len(manager.jobs))
+	for _, state := range manager.jobs {
+		if !strings.Contains("|completed|failed|cancelled|", "|"+state.job.Status+"|") {
+			continue
+		}
+		terminal = append(terminal, state)
+	}
+	sort.Slice(terminal, func(i, j int) bool {
+		return terminal[i].job.CreatedAt.Before(terminal[j].job.CreatedAt)
+	})
+	for _, state := range terminal {
+		if len(manager.jobs) <= manager.maxJobs {
+			break
+		}
+		delete(manager.jobs, state.job.ID)
+		selectionKey := state.job.CandidateID + "|" + state.job.VariantID
+		if manager.bySelection[selectionKey] == state.job.ID {
+			delete(manager.bySelection, selectionKey)
+		}
+	}
+}
+
+func (manager *Manager) persistBestEffort() {
+	if err := manager.persist(); err != nil {
+		slog.Warn("persist job state", "error", err)
+	}
+}
+
+func (manager *Manager) persist() error {
+	if manager.stateFile == "" {
+		return nil
+	}
+	manager.persistMu.Lock()
+	defer manager.persistMu.Unlock()
+	manager.mu.RLock()
+	items := make([]persistedJob, 0, len(manager.jobs))
+	for _, state := range manager.jobs {
+		items = append(items, persistedJob{
+			Job: state.job, Candidate: state.candidate, Variant: state.variant, TempPath: state.tempPath,
+		})
+	}
+	manager.mu.RUnlock()
+	sort.Slice(items, func(i, j int) bool { return items[i].Job.CreatedAt.Before(items[j].Job.CreatedAt) })
+	if err := statefile.Write(manager.stateFile, persistedState{Version: 1, Jobs: items}); err != nil {
+		return fmt.Errorf("persist job state: %w", err)
+	}
+	return nil
+}
+
 func (manager *Manager) Cancel(id string) (Job, error) {
 	manager.mu.Lock()
 	state := manager.jobs[id]
@@ -231,7 +371,22 @@ func (manager *Manager) Cancel(id string) (Job, error) {
 	}
 	job := state.job
 	manager.mu.Unlock()
+	manager.persistBestEffort()
 	return job, nil
+}
+
+func (manager *Manager) Reveal(id string) error {
+	job, err := manager.Get(id)
+	if err != nil {
+		return err
+	}
+	if job.Status != "completed" || job.OutputPath == "" {
+		return errors.New("only a completed download can be revealed")
+	}
+	if _, err := os.Stat(job.OutputPath); err != nil {
+		return fmt.Errorf("downloaded file is unavailable: %w", err)
+	}
+	return revealFile(job.OutputPath)
 }
 
 func (manager *Manager) worker() {
@@ -260,6 +415,7 @@ func (manager *Manager) run(id string) {
 	variantID := state.job.VariantID
 	outputPath := state.job.OutputPath
 	manager.mu.Unlock()
+	manager.persistBestEffort()
 
 	slog.Info("download started", "jobId", jobID, "candidateId", candidateID, "variantId", variantID, "outputPath", outputPath)
 
@@ -274,9 +430,9 @@ func (manager *Manager) run(id string) {
 	})
 
 	manager.mu.Lock()
-	defer manager.mu.Unlock()
 	state = manager.jobs[id]
 	if state == nil {
+		manager.mu.Unlock()
 		return
 	}
 	state.cancel = nil
@@ -286,6 +442,8 @@ func (manager *Manager) run(id string) {
 		state.job.Status = "cancelled"
 		_ = os.Remove(tempPath)
 		slog.Info("download cancelled", "jobId", jobID, "candidateId", candidateID)
+		manager.mu.Unlock()
+		manager.persistBestEffort()
 		return
 	}
 	if err != nil {
@@ -293,12 +451,16 @@ func (manager *Manager) run(id string) {
 		state.job.Error = err.Error()
 		_ = os.Remove(tempPath)
 		slog.Warn("download failed", "jobId", jobID, "candidateId", candidateID, "error", summarizeDownloadError(err))
+		manager.mu.Unlock()
+		manager.persistBestEffort()
 		return
 	}
 	if _, err := os.Stat(state.job.OutputPath); err == nil {
 		_ = os.Remove(tempPath)
 		state.job.Status = "completed"
 		slog.Info("download completed; output already present", "jobId", jobID, "outputPath", outputPath)
+		manager.mu.Unlock()
+		manager.persistBestEffort()
 		return
 	}
 	if err := os.Rename(tempPath, state.job.OutputPath); err != nil {
@@ -306,10 +468,14 @@ func (manager *Manager) run(id string) {
 		state.job.Error = fmt.Sprintf("move completed file: %v", err)
 		_ = os.Remove(tempPath)
 		slog.Warn("download finalization failed", "jobId", jobID, "error", err)
+		manager.mu.Unlock()
+		manager.persistBestEffort()
 		return
 	}
 	state.job.Status = "completed"
 	slog.Info("download completed", "jobId", jobID, "candidateId", candidateID, "outputPath", outputPath)
+	manager.mu.Unlock()
+	manager.persistBestEffort()
 }
 
 func summarizeDownloadError(err error) string {

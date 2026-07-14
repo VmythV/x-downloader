@@ -17,6 +17,7 @@ type Config struct {
 	DownloadDir      string `json:"downloadDir"`
 	TempDir          string `json:"tempDir"`
 	DiagnosticsDir   string `json:"diagnosticsDir"`
+	StateDir         string `json:"stateDir"`
 	TokenFile        string `json:"tokenFile"`
 	FFmpegPath       string `json:"ffmpegPath"`
 	Concurrency      int    `json:"concurrency"`
@@ -40,6 +41,7 @@ func Default() (Config, error) {
 		DownloadDir:      downloadDir,
 		TempDir:          filepath.Join(downloadDir, ".partial"),
 		DiagnosticsDir:   filepath.Join(appConfigDir, "diagnostics"),
+		StateDir:         filepath.Join(appConfigDir, "state"),
 		TokenFile:        filepath.Join(appConfigDir, "token"),
 		FFmpegPath:       "ffmpeg",
 		Concurrency:      1,
@@ -75,6 +77,10 @@ func Load(path string) (Config, error) {
 	if err != nil {
 		return Config{}, fmt.Errorf("expand diagnostics directory: %w", err)
 	}
+	cfg.StateDir, err = expandHome(cfg.StateDir)
+	if err != nil {
+		return Config{}, fmt.Errorf("expand state directory: %w", err)
+	}
 	cfg.TokenFile, err = expandHome(cfg.TokenFile)
 	if err != nil {
 		return Config{}, fmt.Errorf("expand token file: %w", err)
@@ -102,6 +108,9 @@ func (cfg Config) Validate() error {
 	}
 	if cfg.DiagnosticsDir == "" || !filepath.IsAbs(cfg.DiagnosticsDir) {
 		return errors.New("diagnostics directory must be absolute")
+	}
+	if cfg.StateDir == "" || !filepath.IsAbs(cfg.StateDir) {
+		return errors.New("state directory must be absolute")
 	}
 	if cfg.TokenFile == "" || !filepath.IsAbs(cfg.TokenFile) {
 		return errors.New("token file must be absolute")

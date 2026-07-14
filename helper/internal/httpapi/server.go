@@ -17,10 +17,32 @@ import (
 )
 
 const maxRequestBodyBytes = 64 << 10
+const APIVersion = "1"
 
 type healthResponse struct {
-	Status  string `json:"status"`
-	Version string `json:"version"`
+	Status     string `json:"status"`
+	Version    string `json:"version"`
+	APIVersion string `json:"apiVersion"`
+}
+
+type Readiness struct {
+	FFmpegReady         bool   `json:"ffmpegReady"`
+	FFmpegPath          string `json:"ffmpegPath"`
+	DownloadDir         string `json:"downloadDir"`
+	DownloadDirWritable bool   `json:"downloadDirWritable"`
+	ProxyConfigured     bool   `json:"proxyConfigured"`
+	Concurrency         int    `json:"concurrency"`
+	PersistenceEnabled  bool   `json:"persistenceEnabled"`
+}
+
+type statusResponse struct {
+	Status         string         `json:"status"`
+	Version        string         `json:"version"`
+	APIVersion     string         `json:"apiVersion"`
+	Readiness      Readiness      `json:"readiness"`
+	CandidateCount int            `json:"candidateCount"`
+	Jobs           map[string]int `json:"jobs"`
+	Issues         []string       `json:"issues"`
 }
 
 type observationsRequest struct {
@@ -37,11 +59,32 @@ type createJobRequest struct {
 	VariantID   string `json:"variantId,omitempty"`
 }
 
-func New(version, token string, captures *capture.Store, candidates *media.Store, jobManager *jobs.Manager) http.Handler {
+func New(version, token string, captures *capture.Store, candidates *media.Store, jobManager *jobs.Manager, readinessValues ...Readiness) http.Handler {
+	readiness := Readiness{}
+	if len(readinessValues) > 0 {
+		readiness = readinessValues[0]
+	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /v1/health", func(w http.ResponseWriter, _ *http.Request) {
-		writeJSON(w, http.StatusOK, healthResponse{Status: "ok", Version: version})
+		writeJSON(w, http.StatusOK, healthResponse{Status: "ok", Version: version, APIVersion: APIVersion})
 	})
+	mux.Handle("GET /v1/status", requireToken(token, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		issues := make([]string, 0, 2)
+		if !readiness.FFmpegReady {
+			issues = append(issues, "ffmpeg_unavailable")
+		}
+		if !readiness.DownloadDirWritable {
+			issues = append(issues, "download_directory_not_writable")
+		}
+		status := "ready"
+		if len(issues) > 0 {
+			status = "degraded"
+		}
+		writeJSON(w, http.StatusOK, statusResponse{
+			Status: status, Version: version, APIVersion: APIVersion, Readiness: readiness,
+			CandidateCount: candidates.Count(), Jobs: jobManager.Stats(), Issues: issues,
+		})
+	})))
 	mux.Handle("POST /v1/capture-sessions", requireToken(token, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		session, err := captures.Create()
 		if err != nil {
@@ -136,6 +179,13 @@ func New(version, token string, captures *capture.Store, candidates *media.Store
 			return
 		}
 		writeJSON(w, http.StatusOK, job)
+	})))
+	mux.Handle("POST /v1/jobs/{id}/reveal", requireToken(token, http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+		if err := jobManager.Reveal(request.PathValue("id")); err != nil {
+			writeDomainError(w, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
 	})))
 	return securityHeaders(logRequests(mux))
 }

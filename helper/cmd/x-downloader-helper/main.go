@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
+	"path/filepath"
 	"syscall"
 	"time"
 
@@ -48,12 +49,18 @@ func main() {
 		slog.Info("FFmpeg detected", "path", resolvedFFmpeg)
 	}
 	captureStore := capture.NewStore(cfg.DiagnosticsDir, nil)
-	mediaStore := media.NewStore(nil)
-	jobManager, err := jobs.NewManager(
+	mediaStore, err := media.NewPersistentStore(filepath.Join(cfg.StateDir, "candidates.json"), 300, nil)
+	if err != nil {
+		slog.Error("initialize media store", "error", err)
+		os.Exit(1)
+	}
+	jobManager, err := jobs.NewPersistentManager(
 		cfg.Concurrency,
 		cfg.DownloadDir,
 		cfg.TempDir,
 		cfg.FilenameTemplate,
+		filepath.Join(cfg.StateDir, "jobs.json"),
+		500,
 		mediaStore,
 		jobs.FFmpegRunner{Path: cfg.FFmpegPath},
 	)
@@ -61,10 +68,19 @@ func main() {
 		slog.Error("initialize download manager", "error", err)
 		os.Exit(1)
 	}
+	downloadDirWritable := directoryWritable(cfg.DownloadDir)
+	ffmpegPath := cfg.FFmpegPath
+	if resolvedFFmpeg != "" {
+		ffmpegPath = resolvedFFmpeg
+	}
 
 	server := &http.Server{
-		Addr:              cfg.ListenAddress,
-		Handler:           httpapi.New(version, token, captureStore, mediaStore, jobManager),
+		Addr: cfg.ListenAddress,
+		Handler: httpapi.New(version, token, captureStore, mediaStore, jobManager, httpapi.Readiness{
+			FFmpegReady: ffmpegErr == nil, FFmpegPath: ffmpegPath,
+			DownloadDir: cfg.DownloadDir, DownloadDirWritable: downloadDirWritable,
+			ProxyConfigured: proxyConfigured(), Concurrency: cfg.Concurrency, PersistenceEnabled: true,
+		}),
 		ReadHeaderTimeout: 5 * time.Second,
 		ReadTimeout:       10 * time.Second,
 		WriteTimeout:      60 * time.Second,
@@ -90,6 +106,7 @@ func main() {
 		"downloadDir", cfg.DownloadDir,
 		"tempDir", cfg.TempDir,
 		"diagnosticsDir", cfg.DiagnosticsDir,
+		"stateDir", cfg.StateDir,
 		"concurrency", cfg.Concurrency,
 		"ffmpegPath", cfg.FFmpegPath,
 		"proxyConfigured", proxyConfigured(),
@@ -99,6 +116,19 @@ func main() {
 		os.Exit(1)
 	}
 	slog.Info("helper stopped")
+}
+
+func directoryWritable(path string) bool {
+	file, err := os.CreateTemp(path, ".write-check-*")
+	if err != nil {
+		return false
+	}
+	name := file.Name()
+	if err := file.Close(); err != nil {
+		_ = os.Remove(name)
+		return false
+	}
+	return os.Remove(name) == nil
 }
 
 func proxyConfigured() bool {
