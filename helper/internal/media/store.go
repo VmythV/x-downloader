@@ -136,7 +136,7 @@ func (store *Store) Register(ctx context.Context, masterURL string, pageContext 
 	if err != nil {
 		return Candidate{}, err
 	}
-	request.Header.Set("User-Agent", "X-Downloader-Helper/0.3")
+	request.Header.Set("User-Agent", "X-Downloader-Helper/0.4")
 	request.Header.Set("Referer", "https://x.com/")
 	response, err := store.client.Do(request)
 	if err != nil {

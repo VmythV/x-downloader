@@ -15,9 +15,11 @@ import (
 
 	"x-downloader/helper/internal/auth"
 	"x-downloader/helper/internal/config"
+	"x-downloader/helper/internal/downloadpath"
 	"x-downloader/helper/internal/httpapi"
 	"x-downloader/helper/internal/jobs"
 	"x-downloader/helper/internal/media"
+	"x-downloader/helper/internal/settings"
 )
 
 var version = "dev"
@@ -52,9 +54,18 @@ func main() {
 		slog.Error("initialize media store", "error", err)
 		os.Exit(1)
 	}
+	appSettings, err := settings.New(filepath.Join(cfg.StateDir, "settings.json"), cfg.DownloadDir, nil)
+	if err != nil {
+		slog.Error("initialize application settings", "error", err)
+		os.Exit(1)
+	}
+	activeDownloadDir := appSettings.Get().DownloadDir
+	if _, err := downloadpath.Prepare(activeDownloadDir); err != nil {
+		slog.Warn("download directory is currently unavailable; change it from extension settings", "path", activeDownloadDir, "error", err)
+	}
 	jobManager, err := jobs.NewPersistentManager(
 		cfg.Concurrency,
-		cfg.DownloadDir,
+		activeDownloadDir,
 		cfg.TempDir,
 		cfg.FilenameTemplate,
 		filepath.Join(cfg.StateDir, "jobs.json"),
@@ -66,7 +77,7 @@ func main() {
 		slog.Error("initialize download manager", "error", err)
 		os.Exit(1)
 	}
-	downloadDirWritable := directoryWritable(cfg.DownloadDir)
+	appSettings.Bind(jobManager)
 	ffmpegPath := cfg.FFmpegPath
 	if resolvedFFmpeg != "" {
 		ffmpegPath = resolvedFFmpeg
@@ -74,10 +85,12 @@ func main() {
 
 	server := &http.Server{
 		Addr: cfg.ListenAddress,
-		Handler: httpapi.New(version, token, mediaStore, jobManager, httpapi.Readiness{
-			FFmpegReady: ffmpegErr == nil, FFmpegPath: ffmpegPath,
-			DownloadDir: cfg.DownloadDir, DownloadDirWritable: downloadDirWritable,
-			ProxyConfigured: proxyConfigured(), Concurrency: cfg.Concurrency, PersistenceEnabled: true,
+		Handler: httpapi.New(version, token, mediaStore, jobManager, httpapi.Options{
+			Settings: appSettings,
+			Readiness: httpapi.Readiness{
+				FFmpegReady: ffmpegErr == nil, FFmpegPath: ffmpegPath,
+				ProxyConfigured: proxyConfigured(), Concurrency: cfg.Concurrency, PersistenceEnabled: true,
+			},
 		}),
 		ReadHeaderTimeout: 5 * time.Second,
 		ReadTimeout:       10 * time.Second,
@@ -101,7 +114,7 @@ func main() {
 	slog.Info("starting helper",
 		"version", version,
 		"address", cfg.ListenAddress,
-		"downloadDir", cfg.DownloadDir,
+		"downloadDir", activeDownloadDir,
 		"tempDir", cfg.TempDir,
 		"stateDir", cfg.StateDir,
 		"concurrency", cfg.Concurrency,
@@ -113,19 +126,6 @@ func main() {
 		os.Exit(1)
 	}
 	slog.Info("helper stopped")
-}
-
-func directoryWritable(path string) bool {
-	file, err := os.CreateTemp(path, ".write-check-*")
-	if err != nil {
-		return false
-	}
-	name := file.Name()
-	if err := file.Close(); err != nil {
-		_ = os.Remove(name)
-		return false
-	}
-	return os.Remove(name) == nil
 }
 
 func proxyConfigured() bool {

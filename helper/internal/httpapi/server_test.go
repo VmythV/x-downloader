@@ -8,12 +8,15 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
 
+	"x-downloader/helper/internal/folderpicker"
 	"x-downloader/helper/internal/jobs"
 	"x-downloader/helper/internal/media"
+	"x-downloader/helper/internal/settings"
 )
 
 type roundTripFunc func(*http.Request) (*http.Response, error)
@@ -29,7 +32,14 @@ func (testRunner) Run(_ context.Context, spec jobs.DownloadSpec, onProgress func
 	return os.WriteFile(spec.OutputPath, []byte("mp4"), 0o600)
 }
 
-func newTestHandler(t *testing.T) http.Handler {
+type testEnvironment struct {
+	handler     http.Handler
+	root        string
+	pickedDir   string
+	appSettings *settings.Manager
+}
+
+func newTestEnvironment(t *testing.T) testEnvironment {
 	t.Helper()
 	client := &http.Client{Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {
 		body := "#EXTM3U\n#EXTINF:4,\nsegment.m4s\n"
@@ -59,7 +69,29 @@ func newTestHandler(t *testing.T) http.Handler {
 	if err != nil {
 		t.Fatal(err)
 	}
-	return New("test-version", "test-secret-token-value-1234567890", mediaStore, jobManager)
+	pickedDir := filepath.Join(root, "picked-downloads")
+	appSettings, err := settings.New(
+		filepath.Join(root, "state", "settings.json"),
+		filepath.Join(root, "downloads"),
+		folderpicker.PickerFunc(func(context.Context) (string, error) { return pickedDir, nil }),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	appSettings.Bind(jobManager)
+	return testEnvironment{
+		handler: New("test-version", "test-secret-token-value-1234567890", mediaStore, jobManager, Options{
+			Settings: appSettings,
+			Readiness: Readiness{
+				FFmpegReady: true, FFmpegPath: "ffmpeg", Concurrency: 1, PersistenceEnabled: true,
+			},
+		}),
+		root: root, pickedDir: pickedDir, appSettings: appSettings,
+	}
+}
+
+func newTestHandler(t *testing.T) http.Handler {
+	return newTestEnvironment(t).handler
 }
 
 func TestHealth(t *testing.T) {
@@ -82,8 +114,38 @@ func TestStatusReportsAuthenticatedReadiness(t *testing.T) {
 	request.Header.Set("Authorization", "Bearer test-secret-token-value-1234567890")
 	response := httptest.NewRecorder()
 	handler.ServeHTTP(response, request)
-	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `"apiVersion":"1"`) {
+	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `"apiVersion":"2"`) {
 		t.Fatalf("unexpected status response: %d %s", response.Code, response.Body.String())
+	}
+}
+
+func TestSettingsPickUpdateAndRestoreDownloadDirectory(t *testing.T) {
+	environment := newTestEnvironment(t)
+	token := "Bearer test-secret-token-value-1234567890"
+
+	pickRequest := httptest.NewRequest(http.MethodPost, "/v1/settings/pick-download-directory", nil)
+	pickRequest.Header.Set("Authorization", token)
+	pickResponse := httptest.NewRecorder()
+	environment.handler.ServeHTTP(pickResponse, pickRequest)
+	if pickResponse.Code != http.StatusOK || !strings.Contains(pickResponse.Body.String(), environment.pickedDir) {
+		t.Fatalf("unexpected picker response: %d %s", pickResponse.Code, pickResponse.Body.String())
+	}
+
+	updateBody := `{"downloadDir":` + strconv.Quote(environment.pickedDir) + `}`
+	updateRequest := httptest.NewRequest(http.MethodPut, "/v1/settings", strings.NewReader(updateBody))
+	updateRequest.Header.Set("Authorization", token)
+	updateResponse := httptest.NewRecorder()
+	environment.handler.ServeHTTP(updateResponse, updateRequest)
+	if updateResponse.Code != http.StatusOK || environment.appSettings.Get().DownloadDir != environment.pickedDir {
+		t.Fatalf("unexpected update response: %d %s", updateResponse.Code, updateResponse.Body.String())
+	}
+
+	restored, err := settings.New(filepath.Join(environment.root, "state", "settings.json"), filepath.Join(environment.root, "downloads"), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if restored.Get().DownloadDir != environment.pickedDir {
+		t.Fatalf("updated directory was not restored: %+v", restored.Get())
 	}
 }
 

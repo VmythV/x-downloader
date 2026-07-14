@@ -91,3 +91,25 @@ func TestPersistentManagerRestoresCompletedHistory(t *testing.T) {
 		t.Fatalf("unexpected restored jobs: %+v", items)
 	}
 }
+
+func TestManagerUsesUpdatedDownloadDirectoryForNewJobs(t *testing.T) {
+	audio := &hls.Audio{URL: "https://video.twimg.com/audio.m3u8"}
+	candidate := media.Candidate{
+		ID: "media-new-directory", MediaID: "789",
+		Variants: []hls.Variant{{ID: "highest", URL: "https://video.twimg.com/video.m3u8", Width: 1920, Height: 1080, Audio: audio}},
+	}
+	root := t.TempDir()
+	manager, err := NewManager(1, filepath.Join(root, "original"), filepath.Join(root, "temp"), "{mediaId}_{height}p.{ext}", fakeCandidates{candidate}, fakeRunner{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	updatedDir := filepath.Join(root, "updated")
+	manager.SetDownloadDir(updatedDir)
+	job, err := manager.Submit(candidate.ID, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if filepath.Dir(job.OutputPath) != updatedDir {
+		t.Fatalf("new job did not use updated directory: %s", job.OutputPath)
+	}
+}

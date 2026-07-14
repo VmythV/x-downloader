@@ -17,6 +17,7 @@ import (
 	"unicode"
 	"unicode/utf8"
 
+	"x-downloader/helper/internal/downloadpath"
 	"x-downloader/helper/internal/hls"
 	"x-downloader/helper/internal/media"
 	"x-downloader/helper/internal/statefile"
@@ -117,8 +118,9 @@ func newManager(concurrency int, downloadDir, tempDir, filenameTemplate, stateFi
 	if candidates == nil || runner == nil {
 		return nil, errors.New("candidate source and runner are required")
 	}
-	if err := os.MkdirAll(downloadDir, 0o755); err != nil {
-		return nil, fmt.Errorf("create download directory: %w", err)
+	downloadDir, err := downloadpath.Normalize(downloadDir)
+	if err != nil {
+		return nil, err
 	}
 	if err := os.MkdirAll(tempDir, 0o700); err != nil {
 		return nil, fmt.Errorf("create temporary directory: %w", err)
@@ -142,6 +144,12 @@ func newManager(concurrency int, downloadDir, tempDir, filenameTemplate, stateFi
 		go manager.worker()
 	}
 	return manager, nil
+}
+
+func (manager *Manager) SetDownloadDir(path string) {
+	manager.mu.Lock()
+	manager.downloadDir = filepath.Clean(path)
+	manager.mu.Unlock()
 }
 
 func (manager *Manager) restore() error {
@@ -196,6 +204,13 @@ func (manager *Manager) Submit(candidateID, variantID string) (Job, error) {
 	if variant.Audio == nil || variant.Audio.URL == "" {
 		return Job{}, errors.New("selected video variant has no associated audio rendition")
 	}
+	manager.mu.RLock()
+	downloadDir := manager.downloadDir
+	manager.mu.RUnlock()
+	downloadDir, err = downloadpath.Prepare(downloadDir)
+	if err != nil {
+		return Job{}, err
+	}
 	selectionKey := candidate.ID + "|" + variant.ID
 
 	manager.mu.Lock()
@@ -221,7 +236,7 @@ func (manager *Manager) Submit(candidateID, variantID string) (Job, error) {
 		return Job{}, err
 	}
 	filename := buildFilename(manager.filenameTemplate, candidate, variant, time.Now())
-	outputPath := filepath.Join(manager.downloadDir, filename)
+	outputPath := filepath.Join(downloadDir, filename)
 	tempPath := filepath.Join(manager.tempDir, id+".part.mp4")
 	now := time.Now().UTC()
 	state := &jobState{

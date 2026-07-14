@@ -10,12 +10,14 @@ import (
 	"strings"
 	"time"
 
+	"x-downloader/helper/internal/downloadpath"
 	"x-downloader/helper/internal/jobs"
 	"x-downloader/helper/internal/media"
+	"x-downloader/helper/internal/settings"
 )
 
 const maxRequestBodyBytes = 64 << 10
-const APIVersion = "1"
+const APIVersion = "2"
 
 type healthResponse struct {
 	Status     string `json:"status"`
@@ -53,16 +55,31 @@ type createJobRequest struct {
 	VariantID   string `json:"variantId,omitempty"`
 }
 
-func New(version, token string, candidates *media.Store, jobManager *jobs.Manager, readinessValues ...Readiness) http.Handler {
-	readiness := Readiness{}
-	if len(readinessValues) > 0 {
-		readiness = readinessValues[0]
+type updateSettingsRequest struct {
+	DownloadDir string `json:"downloadDir"`
+}
+
+type Options struct {
+	Readiness Readiness
+	Settings  *settings.Manager
+}
+
+func New(version, token string, candidates *media.Store, jobManager *jobs.Manager, optionValues ...Options) http.Handler {
+	options := Options{}
+	if len(optionValues) > 0 {
+		options = optionValues[0]
 	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /v1/health", func(w http.ResponseWriter, _ *http.Request) {
 		writeJSON(w, http.StatusOK, healthResponse{Status: "ok", Version: version, APIVersion: APIVersion})
 	})
 	mux.Handle("GET /v1/status", requireToken(token, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		readiness := options.Readiness
+		if options.Settings != nil {
+			current := options.Settings.Get()
+			readiness.DownloadDir = current.DownloadDir
+			readiness.DownloadDirWritable = downloadpath.Writable(current.DownloadDir)
+		}
 		issues := make([]string, 0, 2)
 		if !readiness.FFmpegReady {
 			issues = append(issues, "ffmpeg_unavailable")
@@ -79,6 +96,37 @@ func New(version, token string, candidates *media.Store, jobManager *jobs.Manage
 			CandidateCount: candidates.Count(), Jobs: jobManager.Stats(), Issues: issues,
 		})
 	})))
+	if options.Settings != nil {
+		mux.Handle("GET /v1/settings", requireToken(token, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			writeJSON(w, http.StatusOK, options.Settings.Get())
+		})))
+		mux.Handle("PUT /v1/settings", requireToken(token, http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+			var input updateSettingsRequest
+			if err := decodeJSON(w, request, &input); err != nil {
+				writeError(w, http.StatusBadRequest, err)
+				return
+			}
+			updated, err := options.Settings.UpdateDownloadDir(input.DownloadDir)
+			if err != nil {
+				writeError(w, http.StatusBadRequest, err)
+				return
+			}
+			writeJSON(w, http.StatusOK, updated)
+		})))
+		mux.Handle("POST /v1/settings/pick-download-directory", requireToken(token, http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+			_ = http.NewResponseController(w).SetWriteDeadline(time.Now().Add(5 * time.Minute))
+			path, err := options.Settings.PickDownloadDirectory(request.Context())
+			if errors.Is(err, settings.ErrSelectionCancelled) {
+				writeJSON(w, http.StatusOK, map[string]bool{"cancelled": true})
+				return
+			}
+			if err != nil {
+				writeError(w, http.StatusInternalServerError, err)
+				return
+			}
+			writeJSON(w, http.StatusOK, map[string]any{"cancelled": false, "downloadDir": path})
+		})))
+	}
 	mux.Handle("POST /v1/candidates", requireToken(token, http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
 		var input candidateRequest
 		if err := decodeJSON(w, request, &input); err != nil {
@@ -150,6 +198,10 @@ func New(version, token string, candidates *media.Store, jobManager *jobs.Manage
 type statusWriter struct {
 	http.ResponseWriter
 	status int
+}
+
+func (writer *statusWriter) Unwrap() http.ResponseWriter {
+	return writer.ResponseWriter
 }
 
 func (writer *statusWriter) WriteHeader(status int) {
