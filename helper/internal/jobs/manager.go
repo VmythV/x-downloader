@@ -336,13 +336,19 @@ func (manager *Manager) persist() error {
 	manager.persistMu.Lock()
 	defer manager.persistMu.Unlock()
 	manager.mu.RLock()
+	defer manager.mu.RUnlock()
+	return manager.persistLocked()
+}
+
+// persistLocked writes a snapshot while manager.mu is held. Callers must also
+// hold persistMu so snapshots cannot be written out of order.
+func (manager *Manager) persistLocked() error {
 	items := make([]persistedJob, 0, len(manager.jobs))
 	for _, state := range manager.jobs {
 		items = append(items, persistedJob{
 			Job: state.job, Candidate: state.candidate, Variant: state.variant, TempPath: state.tempPath,
 		})
 	}
-	manager.mu.RUnlock()
 	sort.Slice(items, func(i, j int) bool { return items[i].Job.CreatedAt.Before(items[j].Job.CreatedAt) })
 	if err := statefile.Write(manager.stateFile, persistedState{Version: 1, Jobs: items}); err != nil {
 		return fmt.Errorf("persist job state: %w", err)
@@ -429,10 +435,15 @@ func (manager *Manager) run(id string) {
 		manager.mu.Unlock()
 	})
 
+	// Publish a terminal state only after its snapshot is durable. This prevents
+	// a caller from observing "completed" while the state file still says the
+	// job was downloading.
+	manager.persistMu.Lock()
 	manager.mu.Lock()
 	state = manager.jobs[id]
 	if state == nil {
 		manager.mu.Unlock()
+		manager.persistMu.Unlock()
 		return
 	}
 	state.cancel = nil
@@ -442,40 +453,30 @@ func (manager *Manager) run(id string) {
 		state.job.Status = "cancelled"
 		_ = os.Remove(tempPath)
 		slog.Info("download cancelled", "jobId", jobID, "candidateId", candidateID)
-		manager.mu.Unlock()
-		manager.persistBestEffort()
-		return
-	}
-	if err != nil {
+	} else if err != nil {
 		state.job.Status = "failed"
 		state.job.Error = err.Error()
 		_ = os.Remove(tempPath)
 		slog.Warn("download failed", "jobId", jobID, "candidateId", candidateID, "error", summarizeDownloadError(err))
-		manager.mu.Unlock()
-		manager.persistBestEffort()
-		return
-	}
-	if _, err := os.Stat(state.job.OutputPath); err == nil {
+	} else if _, statErr := os.Stat(state.job.OutputPath); statErr == nil {
 		_ = os.Remove(tempPath)
 		state.job.Status = "completed"
 		slog.Info("download completed; output already present", "jobId", jobID, "outputPath", outputPath)
-		manager.mu.Unlock()
-		manager.persistBestEffort()
-		return
-	}
-	if err := os.Rename(tempPath, state.job.OutputPath); err != nil {
+	} else if moveErr := os.Rename(tempPath, state.job.OutputPath); moveErr != nil {
 		state.job.Status = "failed"
-		state.job.Error = fmt.Sprintf("move completed file: %v", err)
+		state.job.Error = fmt.Sprintf("move completed file: %v", moveErr)
 		_ = os.Remove(tempPath)
-		slog.Warn("download finalization failed", "jobId", jobID, "error", err)
-		manager.mu.Unlock()
-		manager.persistBestEffort()
-		return
+		slog.Warn("download finalization failed", "jobId", jobID, "error", moveErr)
+	} else {
+		state.job.Status = "completed"
+		slog.Info("download completed", "jobId", jobID, "candidateId", candidateID, "outputPath", outputPath)
 	}
-	state.job.Status = "completed"
-	slog.Info("download completed", "jobId", jobID, "candidateId", candidateID, "outputPath", outputPath)
+	persistErr := manager.persistLocked()
 	manager.mu.Unlock()
-	manager.persistBestEffort()
+	manager.persistMu.Unlock()
+	if persistErr != nil {
+		slog.Warn("persist terminal job state", "jobId", jobID, "error", persistErr)
+	}
 }
 
 func summarizeDownloadError(err error) string {
