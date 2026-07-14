@@ -82,6 +82,7 @@ type jobState struct {
 type Manager struct {
 	mu               sync.RWMutex
 	persistMu        sync.Mutex
+	finalizeMu       sync.Mutex
 	limitMu          sync.Mutex
 	limitCond        *sync.Cond
 	concurrency      int
@@ -516,6 +517,23 @@ func (manager *Manager) run(id string) {
 		manager.mu.Unlock()
 	})
 
+	outputAlreadyPresent := false
+	var moveErr error
+	if err == nil {
+		// Finalizing a large download on another filesystem can take a while.
+		// Serialize filename commits without blocking job/status API readers.
+		manager.finalizeMu.Lock()
+		if cancelErr := ctx.Err(); cancelErr != nil {
+			moveErr = cancelErr
+		} else if _, statErr := os.Stat(outputPath); statErr == nil {
+			_ = os.Remove(tempPath)
+			outputAlreadyPresent = true
+		} else {
+			moveErr = finalizeDownload(ctx, tempPath, outputPath)
+		}
+		manager.finalizeMu.Unlock()
+	}
+
 	// Publish a terminal state only after its snapshot is durable. This prevents
 	// a caller from observing "completed" while the state file still says the
 	// job was downloading.
@@ -530,7 +548,7 @@ func (manager *Manager) run(id string) {
 	state.cancel = nil
 	finishedAt := time.Now().UTC()
 	state.job.FinishedAt = &finishedAt
-	if errors.Is(err, context.Canceled) {
+	if errors.Is(err, context.Canceled) || errors.Is(moveErr, context.Canceled) {
 		state.job.Status = "cancelled"
 		_ = os.Remove(tempPath)
 		slog.Info("download cancelled", "jobId", jobID, "candidateId", candidateID)
@@ -555,11 +573,10 @@ func (manager *Manager) run(id string) {
 		state.job.Error = err.Error()
 		_ = os.Remove(tempPath)
 		slog.Warn("download failed", "jobId", jobID, "candidateId", candidateID, "error", summarizeDownloadError(err))
-	} else if _, statErr := os.Stat(state.job.OutputPath); statErr == nil {
-		_ = os.Remove(tempPath)
+	} else if outputAlreadyPresent {
 		state.job.Status = "completed"
 		slog.Info("download completed; output already present", "jobId", jobID, "outputPath", outputPath)
-	} else if moveErr := os.Rename(tempPath, state.job.OutputPath); moveErr != nil {
+	} else if moveErr != nil {
 		state.job.Status = "failed"
 		state.job.Error = fmt.Sprintf("move completed file: %v", moveErr)
 		_ = os.Remove(tempPath)
