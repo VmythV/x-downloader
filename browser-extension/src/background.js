@@ -1,8 +1,9 @@
 'use strict';
 
 const HELPER_SETTINGS_KEY = 'helperSettings';
-const EXPECTED_API_VERSION = '1';
+const EXPECTED_API_VERSION = '2';
 const HELPER_REQUEST_TIMEOUT_MS = 20_000;
+const DIRECTORY_PICKER_TIMEOUT_MS = 5 * 60_000;
 
 function isAllowedPage(urlValue) {
   try {
@@ -97,21 +98,37 @@ function localizedHelperError(error, responseStatus = 0) {
   if (/media candidate not found/i.test(message)) {
     return new Error('下载候选已过期，请重新播放该视频');
   }
+  if (/download directory must be absolute/i.test(message)) {
+    return new Error('下载目录必须是绝对路径');
+  }
+  if (/download directory must not be empty/i.test(message)) {
+    return new Error('下载目录不能为空');
+  }
+  if (/download directory is not writable|create download directory/i.test(message)) {
+    return new Error('下载目录不可写，请选择其他文件夹');
+  }
+  if (/directory picker requires zenity or kdialog/i.test(message)) {
+    return new Error('Linux 文件夹选择器需要安装 zenity 或 kdialog，也可以手动输入绝对路径');
+  }
+  if (/open .* directory picker|native directory picker is not supported/i.test(message)) {
+    return new Error('无法打开系统文件夹选择器，可以手动输入绝对路径');
+  }
   return new Error(message || `Helper 请求失败${responseStatus ? `：HTTP ${responseStatus}` : ''}`);
 }
 
 async function helperRequestWithSettings(settings, path, options = {}) {
+  const { timeoutMs = HELPER_REQUEST_TIMEOUT_MS, ...fetchOptions } = options;
   const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), HELPER_REQUEST_TIMEOUT_MS);
+  const timeout = setTimeout(() => controller.abort(), timeoutMs);
   let response;
   try {
     response = await fetch(`${settings.baseUrl}${path}`, {
-      ...options,
+      ...fetchOptions,
       signal: controller.signal,
       headers: {
         Authorization: `Bearer ${settings.token}`,
-        ...(options.body ? { 'Content-Type': 'application/json' } : {}),
-        ...options.headers,
+        ...(fetchOptions.body ? { 'Content-Type': 'application/json' } : {}),
+        ...fetchOptions.headers,
       },
     });
   } catch (error) {
@@ -222,6 +239,21 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       break;
     case 'helper-status':
       operation = helperRequest('/v1/status', { cache: 'no-store' }).then(assertCompatibleStatus);
+      break;
+    case 'app-settings-get':
+      operation = helperRequest('/v1/settings', { cache: 'no-store' });
+      break;
+    case 'app-settings-update':
+      operation = helperRequest('/v1/settings', {
+        method: 'PUT',
+        body: JSON.stringify({ downloadDir: String(message.downloadDir || '') }),
+      });
+      break;
+    case 'app-settings-pick-download-directory':
+      operation = helperRequest('/v1/settings/pick-download-directory', {
+        method: 'POST',
+        timeoutMs: DIRECTORY_PICKER_TIMEOUT_MS,
+      });
       break;
     case 'candidate-list':
       operation = helperRequest('/v1/candidates');

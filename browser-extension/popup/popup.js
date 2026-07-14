@@ -2,6 +2,7 @@
 
 const elements = {
   badge: document.querySelector('#connection-badge'),
+  openSettings: document.querySelector('#open-settings'),
   readinessTitle: document.querySelector('#readiness-title'),
   readinessSummary: document.querySelector('#readiness-summary'),
   readinessList: document.querySelector('#readiness-list'),
@@ -189,6 +190,10 @@ async function load() {
 }
 
 elements.refresh.addEventListener('click', refreshAll);
+
+elements.openSettings.addEventListener('click', () => {
+  chrome.runtime.openOptionsPage().catch(showError);
+});
 
 elements.testHelper.addEventListener('click', async () => {
   showError('');

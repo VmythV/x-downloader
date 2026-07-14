@@ -1,0 +1,91 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>X Downloader 设置</title>
+    <link rel="stylesheet" href="options.css">
+  </head>
+  <body>
+    <main class="page-shell">
+      <header class="page-header">
+        <img src="../icons/icon128.png" alt="" width="54" height="54">
+        <div>
+          <h1>X Downloader 设置</h1>
+          <p>管理本机 Helper、下载位置和浏览器行为</p>
+        </div>
+        <span id="helper-badge" class="badge offline">未连接</span>
+      </header>
+
+      <section class="settings-section">
+        <div class="section-copy">
+          <h2>下载目录</h2>
+          <p>新任务会保存到这个目录。修改不会移动已经完成或正在下载的文件。</p>
+        </div>
+        <div class="field-card">
+          <label for="download-dir">保存到</label>
+          <div class="path-row">
+            <input id="download-dir" type="text" placeholder="请先连接 Helper" spellcheck="false">
+            <button id="pick-directory" type="button" class="secondary">选择文件夹…</button>
+          </div>
+          <div class="button-row">
+            <button id="save-directory" type="button">保存目录</button>
+            <button id="reset-directory" type="button" class="text-button">恢复配置默认目录</button>
+            <span id="directory-status" class="status-text" aria-live="polite"></span>
+          </div>
+        </div>
+      </section>
+
+      <section class="settings-section">
+        <div class="section-copy">
+          <h2>浏览器行为</h2>
+          <p>这些偏好只保存在当前浏览器扩展中。</p>
+        </div>
+        <label class="toggle-card">
+          <input id="download-notifications" type="checkbox" checked>
+          <span>
+            <strong>下载结果通知</strong>
+            <small>下载完成或失败时显示浏览器通知</small>
+          </span>
+        </label>
+      </section>
+
+      <section class="settings-section">
+        <div class="section-copy">
+          <h2>Helper 连接</h2>
+          <p>令牌仅保存在扩展本地存储，用于访问回环地址上的 Helper。</p>
+        </div>
+        <div class="field-card two-columns">
+          <label>
+            Helper 地址
+            <input id="helper-url" type="url" value="http://127.0.0.1:17890" spellcheck="false">
+          </label>
+          <label>
+            配对令牌
+            <input id="helper-token" type="password" autocomplete="off" spellcheck="false">
+          </label>
+          <div class="button-row full-width">
+            <button id="save-connection" type="button">保存并检查</button>
+            <span id="connection-status" class="status-text" aria-live="polite"></span>
+          </div>
+        </div>
+      </section>
+
+      <section class="settings-section planned-section">
+        <div class="section-copy">
+          <h2>后续可扩展设置</h2>
+          <p>页面结构已经预留。适合下一步加入以下能力：</p>
+        </div>
+        <div class="planned-grid">
+          <article><strong>默认画质</strong><span>最高画质、指定分辨率或每次询问</span></article>
+          <article><strong>文件命名</strong><span>作者、日期、帖子 ID 和序号模板</span></article>
+          <article><strong>下载队列</strong><span>并发数、失败重试次数和任务保留量</span></article>
+          <article><strong>完成后行为</strong><span>自动显示文件、清理历史或静默完成</span></article>
+        </div>
+      </section>
+
+      <p id="page-error" class="error" role="alert"></p>
+    </main>
+    <script src="options.js"></script>
+  </body>
+</html>

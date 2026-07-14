@@ -18,7 +18,7 @@ h1, h2, p { margin: 0; }
 h1 { font-size: 20px; }
 h2 { font-size: 15px; }
 
-.app-header, .section-heading, .settings-action, .job-actions {
+.app-header, .header-actions, .section-heading, .settings-action, .job-actions {
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -26,6 +26,7 @@ h2 { font-size: 15px; }
 }
 
 .app-header { margin-bottom: 14px; }
+.header-actions { justify-content: flex-end; }
 .app-header p { margin-top: 2px; color: #8b98a5; font-size: 12px; }
 
 .badge {
