@@ -53,9 +53,18 @@ type Store struct {
 	mu            sync.RWMutex
 	persistMu     sync.Mutex
 	candidates    map[string]Candidate
+	dirty         map[string]struct{}
 	client        *http.Client
 	stateFile     string
+	repository    Repository
 	maxCandidates int
+}
+
+type Repository interface {
+	LoadRecentCandidates(limit int) ([]Candidate, error)
+	GetCandidate(id string) (Candidate, error)
+	UpsertCandidates(candidates []Candidate) error
+	CandidateCount() (int, error)
 }
 
 type persistedState struct {
@@ -89,6 +98,28 @@ func NewPersistentStore(stateFile string, maxCandidates int, client *http.Client
 	return store, nil
 }
 
+func NewRepositoryStore(repository Repository, maxCandidates int, client *http.Client) (*Store, error) {
+	if repository == nil {
+		return nil, errors.New("candidate repository is required")
+	}
+	if maxCandidates <= 0 {
+		maxCandidates = defaultMaxCandidates
+	}
+	store := newStore(client, "", maxCandidates)
+	store.repository = repository
+	items, err := repository.LoadRecentCandidates(maxCandidates)
+	if err != nil {
+		return nil, fmt.Errorf("load media state: %w", err)
+	}
+	for _, candidate := range items {
+		if candidate.ID != "" && candidate.MediaID != "" {
+			store.candidates[candidate.ID] = candidate
+		}
+	}
+	store.pruneLocked()
+	return store, nil
+}
+
 func newStore(client *http.Client, stateFile string, maxCandidates int) *Store {
 	if client == nil {
 		client = &http.Client{
@@ -101,6 +132,7 @@ func newStore(client *http.Client, stateFile string, maxCandidates int) *Store {
 	}
 	return &Store{
 		candidates:    make(map[string]Candidate),
+		dirty:         make(map[string]struct{}),
 		client:        client,
 		stateFile:     stateFile,
 		maxCandidates: maxCandidates,
@@ -131,6 +163,7 @@ func (store *Store) Register(ctx context.Context, masterURL, userAgent string, p
 		existing.Context = mergeContext(existing.Context, cleanContext)
 		existing.UserAgent = userAgent
 		store.candidates[id] = existing
+		store.dirty[id] = struct{}{}
 		store.mu.Unlock()
 		if err := store.persist(); err != nil {
 			return Candidate{}, err
@@ -180,6 +213,7 @@ func (store *Store) Register(ctx context.Context, masterURL, userAgent string, p
 		candidate.Context = mergeContext(existing.Context, candidate.Context)
 	}
 	store.candidates[id] = candidate
+	store.dirty[id] = struct{}{}
 	store.pruneLocked()
 	store.mu.Unlock()
 	if err := store.persist(); err != nil {
@@ -220,20 +254,36 @@ func (store *Store) UpdateUserAgent(id, value string) error {
 	candidate, ok := store.candidates[id]
 	if !ok {
 		store.mu.Unlock()
-		return ErrCandidateNotFound
+		candidate, err = store.Get(id)
+		if err != nil {
+			return err
+		}
+		store.mu.Lock()
 	}
 	candidate.UserAgent = userAgent
 	store.candidates[id] = candidate
+	store.dirty[id] = struct{}{}
 	store.mu.Unlock()
 	return store.persist()
 }
 
 func (store *Store) Get(id string) (Candidate, error) {
 	store.mu.RLock()
-	defer store.mu.RUnlock()
 	candidate, ok := store.candidates[id]
+	store.mu.RUnlock()
 	if !ok {
-		return Candidate{}, ErrCandidateNotFound
+		if store.repository == nil {
+			return Candidate{}, ErrCandidateNotFound
+		}
+		loaded, err := store.repository.GetCandidate(id)
+		if err != nil {
+			return Candidate{}, err
+		}
+		store.mu.Lock()
+		store.candidates[id] = loaded
+		store.pruneLocked()
+		store.mu.Unlock()
+		return loaded, nil
 	}
 	return candidate, nil
 }
@@ -250,6 +300,11 @@ func (store *Store) List() []Candidate {
 }
 
 func (store *Store) Count() int {
+	if store.repository != nil {
+		if count, err := store.repository.CandidateCount(); err == nil {
+			return count
+		}
+	}
 	store.mu.RLock()
 	defer store.mu.RUnlock()
 	return len(store.candidates)
@@ -270,6 +325,31 @@ func (store *Store) pruneLocked() {
 }
 
 func (store *Store) persist() error {
+	if store.repository != nil {
+		store.persistMu.Lock()
+		defer store.persistMu.Unlock()
+		// Keep the candidate lock until the write is acknowledged so an update
+		// to the same candidate cannot have its dirty marker cleared by an older
+		// in-flight snapshot.
+		store.mu.Lock()
+		defer store.mu.Unlock()
+		items := make([]Candidate, 0, len(store.dirty))
+		for id := range store.dirty {
+			if candidate, ok := store.candidates[id]; ok {
+				items = append(items, candidate)
+			}
+		}
+		if len(items) == 0 {
+			return nil
+		}
+		if err := store.repository.UpsertCandidates(items); err != nil {
+			return fmt.Errorf("persist media state: %w", err)
+		}
+		for _, candidate := range items {
+			delete(store.dirty, candidate.ID)
+		}
+		return nil
+	}
 	if store.stateFile == "" {
 		return nil
 	}

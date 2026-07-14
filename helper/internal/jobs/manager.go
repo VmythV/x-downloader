@@ -26,6 +26,7 @@ import (
 const (
 	defaultMaxJobs = 500
 	maxConcurrency = 4
+	maxQueuedJobs  = 100000
 )
 
 type CandidateSource interface {
@@ -45,8 +46,11 @@ type DownloadSpec struct {
 }
 
 type Progress struct {
-	OutTimeSeconds float64 `json:"outTimeSeconds,omitempty"`
-	Speed          string  `json:"speed,omitempty"`
+	OutTimeSeconds  float64 `json:"outTimeSeconds,omitempty"`
+	DurationSeconds float64 `json:"durationSeconds,omitempty"`
+	Percent         float64 `json:"percent,omitempty"`
+	Speed           string  `json:"speed,omitempty"`
+	Phase           string  `json:"phase,omitempty"`
 }
 
 type Runner interface {
@@ -69,6 +73,7 @@ type Job struct {
 	CreatedAt   time.Time  `json:"createdAt"`
 	StartedAt   *time.Time `json:"startedAt,omitempty"`
 	FinishedAt  *time.Time `json:"finishedAt,omitempty"`
+	Revision    int64      `json:"revision,omitempty"`
 }
 
 type jobState struct {
@@ -98,33 +103,53 @@ type Manager struct {
 	retryCount       int
 	retryDelay       func(int) time.Duration
 	stateFile        string
+	repository       Repository
+	dirty            map[string]struct{}
+	revision         int64
 	maxJobs          int
 }
 
-type persistedJob struct {
+type StoredJob struct {
 	Job       Job             `json:"job"`
 	Candidate media.Candidate `json:"candidate"`
 	Variant   hls.Variant     `json:"variant"`
 	TempPath  string          `json:"tempPath"`
 }
 
+type Repository interface {
+	LoadJobs(recentTerminalLimit int) ([]StoredJob, error)
+	GetStoredJob(id string) (StoredJob, error)
+	UpsertJobs(items []StoredJob) error
+	JobStats() (map[string]int, error)
+}
+
 type persistedState struct {
-	Version int            `json:"version"`
-	Jobs    []persistedJob `json:"jobs"`
+	Version int         `json:"version"`
+	Jobs    []StoredJob `json:"jobs"`
 }
 
 func NewManager(concurrency int, downloadDir, tempDir, filenameTemplate string, candidates CandidateSource, runner Runner) (*Manager, error) {
-	return newManager(concurrency, downloadDir, tempDir, filenameTemplate, "", defaultMaxJobs, candidates, runner)
+	return newManager(concurrency, downloadDir, tempDir, filenameTemplate, "", nil, defaultMaxJobs, candidates, runner)
 }
 
 func NewPersistentManager(concurrency int, downloadDir, tempDir, filenameTemplate, stateFile string, maxJobs int, candidates CandidateSource, runner Runner) (*Manager, error) {
 	if maxJobs <= 0 {
 		maxJobs = defaultMaxJobs
 	}
-	return newManager(concurrency, downloadDir, tempDir, filenameTemplate, stateFile, maxJobs, candidates, runner)
+	return newManager(concurrency, downloadDir, tempDir, filenameTemplate, stateFile, nil, maxJobs, candidates, runner)
 }
 
-func newManager(concurrency int, downloadDir, tempDir, filenameTemplate, stateFile string, maxJobs int, candidates CandidateSource, runner Runner) (*Manager, error) {
+func NewRepositoryManager(concurrency int, downloadDir, tempDir, filenameTemplate string, repository Repository, recentJobs int, candidates CandidateSource, runner Runner) (*Manager, error) {
+	if repository == nil {
+		return nil, errors.New("job repository is required")
+	}
+	if recentJobs <= 0 {
+		recentJobs = defaultMaxJobs
+	}
+	return newManager(concurrency, downloadDir, tempDir, filenameTemplate, "", repository, recentJobs, candidates, runner)
+}
+
+func newManager(concurrency int, downloadDir, tempDir, filenameTemplate, stateFile string, repository Repository, maxJobs int, candidates CandidateSource, runner Runner) (*Manager, error) {
 	if concurrency < 1 || concurrency > 4 {
 		return nil, errors.New("job concurrency must be between 1 and 4")
 	}
@@ -141,7 +166,7 @@ func newManager(concurrency int, downloadDir, tempDir, filenameTemplate, stateFi
 	manager := &Manager{
 		jobs:             make(map[string]*jobState),
 		bySelection:      make(map[string]string),
-		queue:            make(chan string, 100),
+		queue:            make(chan string, maxQueuedJobs),
 		candidates:       candidates,
 		runner:           runner,
 		downloadDir:      downloadDir,
@@ -151,8 +176,10 @@ func newManager(concurrency int, downloadDir, tempDir, filenameTemplate, stateFi
 		retryDelay: func(attempt int) time.Duration {
 			return time.Duration(1<<min(max(attempt-1, 0), 3)) * time.Second
 		},
-		stateFile: stateFile,
-		maxJobs:   maxJobs,
+		stateFile:  stateFile,
+		repository: repository,
+		dirty:      make(map[string]struct{}),
+		maxJobs:    maxJobs,
 	}
 	manager.limitCond = sync.NewCond(&manager.limitMu)
 	if err := manager.restore(); err != nil {
@@ -161,6 +188,7 @@ func newManager(concurrency int, downloadDir, tempDir, filenameTemplate, stateFi
 	for range maxConcurrency {
 		go manager.worker()
 	}
+	manager.enqueueRestoredJobs()
 	return manager, nil
 }
 
@@ -196,22 +224,40 @@ func (manager *Manager) SetRetryCount(value int) {
 }
 
 func (manager *Manager) restore() error {
-	if manager.stateFile == "" {
+	if manager.stateFile == "" && manager.repository == nil {
 		return nil
 	}
-	var saved persistedState
-	if err := statefile.Read(manager.stateFile, &saved); err != nil {
-		return fmt.Errorf("load job state: %w", err)
-	}
-	if saved.Version != 0 && saved.Version != 1 {
-		return fmt.Errorf("unsupported job state version %d", saved.Version)
+	var items []StoredJob
+	if manager.repository != nil {
+		loaded, err := manager.repository.LoadJobs(manager.maxJobs)
+		if err != nil {
+			return fmt.Errorf("load job state: %w", err)
+		}
+		items = loaded
+	} else {
+		var saved persistedState
+		if err := statefile.Read(manager.stateFile, &saved); err != nil {
+			return fmt.Errorf("load job state: %w", err)
+		}
+		if saved.Version != 0 && saved.Version != 1 {
+			return fmt.Errorf("unsupported job state version %d", saved.Version)
+		}
+		items = saved.Jobs
 	}
 	recovered := false
-	for _, item := range saved.Jobs {
+	for _, item := range items {
 		if item.Job.ID == "" || item.Job.CandidateID == "" || item.Variant.ID == "" {
 			continue
 		}
-		if item.Job.Status == "queued" || item.Job.Status == "downloading" {
+		if manager.repository != nil && item.Job.Status == "downloading" && item.Job.Attempt < item.Job.MaxAttempts {
+			item.Job.Status = "queued"
+			item.Job.Error = "download resumed after helper restart"
+			item.Job.Progress = Progress{Phase: "queued"}
+			item.Job.StartedAt = nil
+			item.Job.FinishedAt = nil
+			_ = os.Remove(item.TempPath)
+			recovered = true
+		} else if item.Job.Status == "downloading" || (manager.repository == nil && item.Job.Status == "queued") {
 			now := time.Now().UTC()
 			item.Job.Status = "failed"
 			item.Job.Error = "download interrupted because helper restarted"
@@ -219,8 +265,14 @@ func (manager *Manager) restore() error {
 			_ = os.Remove(item.TempPath)
 			recovered = true
 		}
+		if manager.repository != nil && item.Job.Status == "queued" {
+			item.Job.Progress = Progress{Phase: "queued"}
+		}
 		manager.jobs[item.Job.ID] = &jobState{
 			job: item.Job, candidate: item.Candidate, variant: item.Variant, tempPath: item.TempPath,
+		}
+		if item.Job.Revision > manager.revision {
+			manager.revision = item.Job.Revision
 		}
 		selectionKey := item.Job.CandidateID + "|" + item.Job.VariantID
 		existingID := manager.bySelection[selectionKey]
@@ -230,9 +282,26 @@ func (manager *Manager) restore() error {
 	}
 	manager.pruneLocked()
 	if recovered {
+		for id := range manager.jobs {
+			manager.dirty[id] = struct{}{}
+		}
 		manager.persistBestEffort()
 	}
 	return nil
+}
+
+func (manager *Manager) enqueueRestoredJobs() {
+	manager.mu.RLock()
+	ids := make([]string, 0)
+	for id, state := range manager.jobs {
+		if state.job.Status == "queued" {
+			ids = append(ids, id)
+		}
+	}
+	manager.mu.RUnlock()
+	for _, id := range ids {
+		manager.queue <- id
+	}
 }
 
 func (manager *Manager) Submit(candidateID, variantID string) (Job, error) {
@@ -292,12 +361,14 @@ func (manager *Manager) Submit(candidateID, variantID string) (Job, error) {
 		variant:   variant,
 		tempPath:  tempPath,
 	}
+	state.job.Revision = manager.nextRevisionLocked()
 	if _, err := os.Stat(outputPath); err == nil {
 		state.job.Status = "completed"
 		state.job.StartedAt = &now
 		state.job.FinishedAt = &now
 	}
 	manager.jobs[id] = state
+	manager.dirty[id] = struct{}{}
 	manager.bySelection[selectionKey] = id
 	manager.pruneLocked()
 	job := state.job
@@ -310,6 +381,7 @@ func (manager *Manager) Submit(candidateID, variantID string) (Job, error) {
 		default:
 			manager.mu.Lock()
 			delete(manager.jobs, id)
+			delete(manager.dirty, id)
 			if manager.bySelection[selectionKey] == id {
 				delete(manager.bySelection, selectionKey)
 			}
@@ -327,12 +399,21 @@ func (manager *Manager) Submit(candidateID, variantID string) (Job, error) {
 
 func (manager *Manager) Get(id string) (Job, error) {
 	manager.mu.RLock()
-	defer manager.mu.RUnlock()
 	state := manager.jobs[id]
-	if state == nil {
+	if state != nil {
+		job := state.job
+		manager.mu.RUnlock()
+		return job, nil
+	}
+	manager.mu.RUnlock()
+	if manager.repository == nil {
 		return Job{}, ErrJobNotFound
 	}
-	return state.job, nil
+	stored, err := manager.repository.GetStoredJob(id)
+	if err != nil {
+		return Job{}, err
+	}
+	return stored.Job, nil
 }
 
 func (manager *Manager) List() []Job {
@@ -347,6 +428,11 @@ func (manager *Manager) List() []Job {
 }
 
 func (manager *Manager) Stats() map[string]int {
+	if manager.repository != nil {
+		if result, err := manager.repository.JobStats(); err == nil {
+			return result
+		}
+	}
 	manager.mu.RLock()
 	defer manager.mu.RUnlock()
 	result := map[string]int{"total": len(manager.jobs)}
@@ -389,22 +475,43 @@ func (manager *Manager) persistBestEffort() {
 }
 
 func (manager *Manager) persist() error {
-	if manager.stateFile == "" {
+	if manager.stateFile == "" && manager.repository == nil {
 		return nil
 	}
 	manager.persistMu.Lock()
 	defer manager.persistMu.Unlock()
-	manager.mu.RLock()
-	defer manager.mu.RUnlock()
+	manager.mu.Lock()
+	defer manager.mu.Unlock()
 	return manager.persistLocked()
 }
 
 // persistLocked writes a snapshot while manager.mu is held. Callers must also
 // hold persistMu so snapshots cannot be written out of order.
 func (manager *Manager) persistLocked() error {
-	items := make([]persistedJob, 0, len(manager.jobs))
+	items := make([]StoredJob, 0, len(manager.jobs))
+	if manager.repository != nil {
+		for id := range manager.dirty {
+			state := manager.jobs[id]
+			if state == nil {
+				continue
+			}
+			items = append(items, StoredJob{
+				Job: state.job, Candidate: state.candidate, Variant: state.variant, TempPath: state.tempPath,
+			})
+		}
+		if len(items) == 0 {
+			return nil
+		}
+		if err := manager.repository.UpsertJobs(items); err != nil {
+			return fmt.Errorf("persist job state: %w", err)
+		}
+		for _, item := range items {
+			delete(manager.dirty, item.Job.ID)
+		}
+		return nil
+	}
 	for _, state := range manager.jobs {
-		items = append(items, persistedJob{
+		items = append(items, StoredJob{
 			Job: state.job, Candidate: state.candidate, Variant: state.variant, TempPath: state.tempPath,
 		})
 	}
@@ -413,6 +520,16 @@ func (manager *Manager) persistLocked() error {
 		return fmt.Errorf("persist job state: %w", err)
 	}
 	return nil
+}
+
+func (manager *Manager) nextRevisionLocked() int64 {
+	manager.revision++
+	return manager.revision
+}
+
+func (manager *Manager) markDirtyLocked(state *jobState) {
+	state.job.Revision = manager.nextRevisionLocked()
+	manager.dirty[state.job.ID] = struct{}{}
 }
 
 func (manager *Manager) Cancel(id string) (Job, error) {
@@ -427,12 +544,17 @@ func (manager *Manager) Cancel(id string) (Job, error) {
 		now := time.Now().UTC()
 		state.job.Status = "cancelled"
 		state.job.FinishedAt = &now
+		manager.markDirtyLocked(state)
 		slog.Info("queued download cancelled", "jobId", state.job.ID, "candidateId", state.job.CandidateID)
 	case "downloading":
 		if state.cancel != nil {
 			state.cancel()
 			slog.Info("download cancellation requested", "jobId", state.job.ID, "candidateId", state.job.CandidateID)
 		}
+	default:
+		job := state.job
+		manager.mu.Unlock()
+		return job, nil
 	}
 	job := state.job
 	manager.mu.Unlock()
@@ -494,6 +616,7 @@ func (manager *Manager) run(id string) {
 	state.job.Progress = Progress{}
 	state.job.StartedAt = &now
 	state.job.FinishedAt = nil
+	manager.markDirtyLocked(state)
 	videoURL := state.variant.URL
 	audioURL := state.variant.Audio.URL
 	tempPath := state.tempPath
@@ -512,6 +635,9 @@ func (manager *Manager) run(id string) {
 	}, func(progress Progress) {
 		manager.mu.Lock()
 		if current := manager.jobs[id]; current != nil {
+			if progress.Phase == "" {
+				progress.Phase = "downloading"
+			}
 			current.job.Progress = progress
 		}
 		manager.mu.Unlock()
@@ -520,6 +646,14 @@ func (manager *Manager) run(id string) {
 	outputAlreadyPresent := false
 	var moveErr error
 	if err == nil {
+		manager.mu.Lock()
+		if current := manager.jobs[id]; current != nil {
+			current.job.Progress.Phase = "finalizing"
+			if current.job.Progress.Percent > 0 && current.job.Progress.Percent < 99 {
+				current.job.Progress.Percent = 99
+			}
+		}
+		manager.mu.Unlock()
 		// Finalizing a large download on another filesystem can take a while.
 		// Serialize filename commits without blocking job/status API readers.
 		manager.finalizeMu.Lock()
@@ -556,8 +690,10 @@ func (manager *Manager) run(id string) {
 		attempt := state.job.Attempt
 		maxAttempts := state.job.MaxAttempts
 		state.job.Status = "queued"
-		state.job.Error = ""
+		state.job.Error = err.Error()
+		state.job.Progress = Progress{Phase: "queued"}
 		state.job.FinishedAt = nil
+		manager.markDirtyLocked(state)
 		_ = os.Remove(tempPath)
 		persistErr := manager.persistLocked()
 		manager.mu.Unlock()
@@ -585,7 +721,17 @@ func (manager *Manager) run(id string) {
 		state.job.Status = "completed"
 		slog.Info("download completed", "jobId", jobID, "candidateId", candidateID, "outputPath", outputPath)
 	}
+	if state.job.Status == "completed" {
+		state.job.Progress.Phase = "completed"
+		state.job.Progress.Percent = 100
+	}
+	if state.job.Status != "queued" {
+		manager.markDirtyLocked(state)
+	}
 	persistErr := manager.persistLocked()
+	if persistErr == nil {
+		manager.pruneLocked()
+	}
 	manager.mu.Unlock()
 	manager.persistMu.Unlock()
 	if persistErr != nil {

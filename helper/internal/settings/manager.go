@@ -58,16 +58,33 @@ type persistedState struct {
 	Values
 }
 
+type Repository interface {
+	LoadSettings() (Values, bool, error)
+	SaveSettings(Values) error
+}
+
 type Manager struct {
-	mu        sync.RWMutex
-	stateFile string
-	values    Values
-	defaults  Values
-	target    RuntimeTarget
-	picker    folderpicker.Picker
+	mu         sync.RWMutex
+	stateFile  string
+	repository Repository
+	values     Values
+	defaults   Values
+	target     RuntimeTarget
+	picker     folderpicker.Picker
 }
 
 func New(stateFile string, defaults Defaults, picker folderpicker.Picker) (*Manager, error) {
+	return newManager(stateFile, nil, defaults, picker)
+}
+
+func NewRepositoryManager(repository Repository, defaults Defaults, picker folderpicker.Picker) (*Manager, error) {
+	if repository == nil {
+		return nil, errors.New("settings repository is required")
+	}
+	return newManager("", repository, defaults, picker)
+}
+
+func newManager(stateFile string, repository Repository, defaults Defaults, picker folderpicker.Picker) (*Manager, error) {
 	defaultValues, err := validateValues(Values{
 		DownloadDir: defaults.DownloadDir, FilenameTemplate: defaults.FilenameTemplate,
 		Concurrency: defaults.Concurrency, RetryCount: defaults.RetryCount,
@@ -79,25 +96,36 @@ func New(stateFile string, defaults Defaults, picker folderpicker.Picker) (*Mana
 		picker = folderpicker.Native{}
 	}
 	manager := &Manager{
-		stateFile: stateFile,
-		values:    defaultValues,
-		defaults:  defaultValues,
-		picker:    picker,
+		stateFile:  stateFile,
+		repository: repository,
+		values:     defaultValues,
+		defaults:   defaultValues,
+		picker:     picker,
 	}
-	var saved persistedState
-	if err := statefile.Read(stateFile, &saved); err != nil {
-		return nil, fmt.Errorf("load application settings: %w", err)
-	}
-	if saved.Version != 0 && saved.Version != 1 && saved.Version != stateVersion {
-		return nil, fmt.Errorf("unsupported application settings version %d", saved.Version)
-	}
-	if saved.DownloadDir != "" {
-		manager.values.DownloadDir = saved.DownloadDir
-	}
-	if saved.Version >= 2 {
-		manager.values.FilenameTemplate = saved.FilenameTemplate
-		manager.values.Concurrency = saved.Concurrency
-		manager.values.RetryCount = saved.RetryCount
+	if repository != nil {
+		saved, found, err := repository.LoadSettings()
+		if err != nil {
+			return nil, fmt.Errorf("load application settings: %w", err)
+		}
+		if found {
+			manager.values = saved
+		}
+	} else {
+		var saved persistedState
+		if err := statefile.Read(stateFile, &saved); err != nil {
+			return nil, fmt.Errorf("load application settings: %w", err)
+		}
+		if saved.Version != 0 && saved.Version != 1 && saved.Version != stateVersion {
+			return nil, fmt.Errorf("unsupported application settings version %d", saved.Version)
+		}
+		if saved.DownloadDir != "" {
+			manager.values.DownloadDir = saved.DownloadDir
+		}
+		if saved.Version >= 2 {
+			manager.values.FilenameTemplate = saved.FilenameTemplate
+			manager.values.Concurrency = saved.Concurrency
+			manager.values.RetryCount = saved.RetryCount
+		}
 	}
 	manager.values, err = validateValues(manager.values, false)
 	if err != nil {
@@ -141,12 +169,19 @@ func (manager *Manager) Update(update Update) (Snapshot, error) {
 	if err != nil {
 		return Snapshot{}, err
 	}
-	if err := statefile.Write(manager.stateFile, persistedState{Version: stateVersion, Values: validated}); err != nil {
+	if err := manager.save(validated); err != nil {
 		return Snapshot{}, fmt.Errorf("save application settings: %w", err)
 	}
 	manager.values = validated
 	manager.applyLocked()
 	return manager.snapshotLocked(), nil
+}
+
+func (manager *Manager) save(values Values) error {
+	if manager.repository != nil {
+		return manager.repository.SaveSettings(values)
+	}
+	return statefile.Write(manager.stateFile, persistedState{Version: stateVersion, Values: values})
 }
 
 func (manager *Manager) UpdateDownloadDir(path string) (Snapshot, error) {
