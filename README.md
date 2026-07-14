@@ -12,6 +12,7 @@ X Downloader 是一个由 Chromium 扩展和本地 Go Helper 组成的 X/Twitter
 - Helper 精确匹配 master 中的视频 variant 与音频 rendition，再由 FFmpeg 封装为 MP4。
 - 支持队列、并发限制、取消、失败重试、完成通知和在文件管理器中显示。
 - 扩展弹窗展示 Helper、FFmpeg、下载目录、持久化和最近任务状态。
+- 独立设置页可调用系统文件夹选择器；下载目录立即生效并在 Helper 重启后恢复。
 - 候选和任务会持久化；Helper 重启时未完成任务会标为可重试。
 - 严格限制为回环 Helper 和 `video.twimg.com` HTTPS playlist。
 
@@ -43,9 +44,10 @@ cd helper
 临时文件：~/Downloads/X-Media/.partial/
 令牌：    用户配置目录/x-downloader/token
 状态：    用户配置目录/x-downloader/state/
+应用设置：用户配置目录/x-downloader/state/settings.json
 ```
 
-可复制 [helper/config.example.json](helper/config.example.json) 修改下载目录、FFmpeg 路径、并发数和文件名模板。
+下载目录可以直接在扩展设置页选择。也可复制 [helper/config.example.json](helper/config.example.json) 修改默认下载目录、FFmpeg 路径、并发数和文件名模板。
 
 ## 项目结构
 
