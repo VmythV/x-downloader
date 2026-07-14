@@ -12,7 +12,7 @@ X Downloader 是一个由 Chromium 扩展和本地 Go Helper 组成的 X/Twitter
 - Helper 精确匹配 master 中的视频 variant 与音频 rendition，再由 FFmpeg 封装为 MP4。
 - 支持队列、并发限制、取消、失败重试、完成通知和在文件管理器中显示。
 - 扩展弹窗展示 Helper、FFmpeg、下载目录、持久化和最近任务状态。
-- 独立设置页可调用系统文件夹选择器；下载目录立即生效并在 Helper 重启后恢复。
+- 独立设置页可调用系统文件夹选择器；下载目录立即生效并在 Helper 重启后恢复，支持外置磁盘和其他挂载卷。
 - 设置页支持文件命名模板、1–4 个并发任务、0–5 次失败重试和下载总开关。
 - Helper 获取 master 和 FFmpeg 下载分片时使用扩展读取的当前浏览器 User-Agent。
 - 候选和任务会持久化；Helper 重启时未完成任务会标为可重试。
