@@ -2,7 +2,7 @@
 
 const HELPER_SETTINGS_KEY = 'helperSettings';
 const DOWNLOAD_ENABLED_KEY = 'downloadEnabled';
-const EXPECTED_API_VERSION = '3';
+const EXPECTED_API_VERSION = '4';
 const HELPER_REQUEST_TIMEOUT_MS = 20_000;
 const DIRECTORY_PICKER_TIMEOUT_MS = 5 * 60_000;
 

@@ -20,6 +20,7 @@ import (
 	"x-downloader/helper/internal/jobs"
 	"x-downloader/helper/internal/media"
 	"x-downloader/helper/internal/settings"
+	"x-downloader/helper/internal/storage"
 )
 
 var version = "dev"
@@ -49,15 +50,30 @@ func main() {
 	} else {
 		slog.Info("FFmpeg detected", "path", resolvedFFmpeg)
 	}
-	mediaStore, err := media.NewPersistentStore(filepath.Join(cfg.StateDir, "candidates.json"), 300, nil)
+	defaultSettings := settings.Defaults{
+		DownloadDir: cfg.DownloadDir, FilenameTemplate: cfg.FilenameTemplate,
+		Concurrency: cfg.Concurrency, RetryCount: cfg.RetryCount,
+	}
+	database, err := storage.Open(filepath.Join(cfg.StateDir, "x-downloader.sqlite3"), storage.LegacyPaths{
+		Candidates: filepath.Join(cfg.StateDir, "candidates.json"),
+		Jobs:       filepath.Join(cfg.StateDir, "jobs.json"),
+		Settings:   filepath.Join(cfg.StateDir, "settings.json"),
+		Defaults: settings.Values{
+			DownloadDir: cfg.DownloadDir, FilenameTemplate: cfg.FilenameTemplate,
+			Concurrency: cfg.Concurrency, RetryCount: cfg.RetryCount,
+		},
+	})
+	if err != nil {
+		slog.Error("initialize SQLite storage", "error", err)
+		os.Exit(1)
+	}
+	defer database.Close()
+	mediaStore, err := media.NewRepositoryStore(database, 300, nil)
 	if err != nil {
 		slog.Error("initialize media store", "error", err)
 		os.Exit(1)
 	}
-	appSettings, err := settings.New(filepath.Join(cfg.StateDir, "settings.json"), settings.Defaults{
-		DownloadDir: cfg.DownloadDir, FilenameTemplate: cfg.FilenameTemplate,
-		Concurrency: cfg.Concurrency, RetryCount: cfg.RetryCount,
-	}, nil)
+	appSettings, err := settings.NewRepositoryManager(database, defaultSettings, nil)
 	if err != nil {
 		slog.Error("initialize application settings", "error", err)
 		os.Exit(1)
@@ -67,12 +83,12 @@ func main() {
 	if _, err := downloadpath.Prepare(activeDownloadDir); err != nil {
 		slog.Warn("download directory is currently unavailable; change it from extension settings", "path", activeDownloadDir, "error", err)
 	}
-	jobManager, err := jobs.NewPersistentManager(
+	jobManager, err := jobs.NewRepositoryManager(
 		activeSettings.Concurrency,
 		activeDownloadDir,
 		cfg.TempDir,
 		activeSettings.FilenameTemplate,
-		filepath.Join(cfg.StateDir, "jobs.json"),
+		database,
 		500,
 		mediaStore,
 		jobs.FFmpegRunner{Path: cfg.FFmpegPath},
@@ -91,6 +107,7 @@ func main() {
 		Addr: cfg.ListenAddress,
 		Handler: httpapi.New(version, token, mediaStore, jobManager, httpapi.Options{
 			Settings: appSettings,
+			Storage:  database,
 			Readiness: httpapi.Readiness{
 				FFmpegReady: ffmpegErr == nil, FFmpegPath: ffmpegPath,
 				ProxyConfigured: proxyConfigured(), PersistenceEnabled: true,
@@ -121,6 +138,7 @@ func main() {
 		"downloadDir", activeDownloadDir,
 		"tempDir", cfg.TempDir,
 		"stateDir", cfg.StateDir,
+		"database", database.Path(),
 		"concurrency", activeSettings.Concurrency,
 		"retryCount", activeSettings.RetryCount,
 		"ffmpegPath", cfg.FFmpegPath,

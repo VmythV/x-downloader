@@ -17,6 +17,7 @@ import (
 	"x-downloader/helper/internal/jobs"
 	"x-downloader/helper/internal/media"
 	"x-downloader/helper/internal/settings"
+	"x-downloader/helper/internal/storage"
 )
 
 type roundTripFunc func(*http.Request) (*http.Response, error)
@@ -106,6 +107,57 @@ func TestHealth(t *testing.T) {
 	}
 }
 
+func TestDashboardIsServedWithSecurityHeaders(t *testing.T) {
+	request := httptest.NewRequest(http.MethodGet, "/", nil)
+	response := httptest.NewRecorder()
+	newTestHandler(t).ServeHTTP(response, request)
+	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), "X Downloader 管理") {
+		t.Fatalf("unexpected dashboard response: %d %s", response.Code, response.Body.String())
+	}
+	if !strings.Contains(response.Header().Get("Content-Security-Policy"), "connect-src 'self'") {
+		t.Fatalf("dashboard CSP is missing: %q", response.Header().Get("Content-Security-Policy"))
+	}
+}
+
+func TestDashboardDataRoutesRequireAuthenticationAndRespond(t *testing.T) {
+	root := t.TempDir()
+	database, err := storage.Open(filepath.Join(root, "state", "x-downloader.sqlite3"), storage.LegacyPaths{
+		Defaults: settings.Values{
+			DownloadDir: filepath.Join(root, "downloads"), FilenameTemplate: "{mediaId}.{ext}",
+			Concurrency: 1, RetryCount: 1,
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	mux := http.NewServeMux()
+	registerStorageRoutes(mux, "dashboard-test-token-value-1234567890", database)
+
+	unauthorized := httptest.NewRecorder()
+	mux.ServeHTTP(unauthorized, httptest.NewRequest(http.MethodGet, "/v1/statistics", nil))
+	if unauthorized.Code != http.StatusUnauthorized {
+		t.Fatalf("statistics did not require authentication: %d", unauthorized.Code)
+	}
+
+	request := func(method, path, body string) *httptest.ResponseRecorder {
+		t.Helper()
+		value := httptest.NewRequest(method, path, strings.NewReader(body))
+		value.Header.Set("Authorization", "Bearer dashboard-test-token-value-1234567890")
+		response := httptest.NewRecorder()
+		mux.ServeHTTP(response, value)
+		return response
+	}
+	if response := request(http.MethodPost, "/v1/tags", `{"name":"收藏","color":"#ff8800"}`); response.Code != http.StatusCreated {
+		t.Fatalf("create tag: %d %s", response.Code, response.Body.String())
+	}
+	for _, path := range []string{"/v1/statistics", "/v1/tags", "/v1/history?limit=10", "/v1/job-history?limit=10"} {
+		if response := request(http.MethodGet, path, ""); response.Code != http.StatusOK {
+			t.Errorf("GET %s: %d %s", path, response.Code, response.Body.String())
+		}
+	}
+}
+
 func TestStatusReportsAuthenticatedReadiness(t *testing.T) {
 	handler := newTestHandler(t)
 	unauthorized := httptest.NewRecorder()
@@ -117,7 +169,7 @@ func TestStatusReportsAuthenticatedReadiness(t *testing.T) {
 	request.Header.Set("Authorization", "Bearer test-secret-token-value-1234567890")
 	response := httptest.NewRecorder()
 	handler.ServeHTTP(response, request)
-	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `"apiVersion":"3"`) {
+	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `"apiVersion":"4"`) {
 		t.Fatalf("unexpected status response: %d %s", response.Code, response.Body.String())
 	}
 }

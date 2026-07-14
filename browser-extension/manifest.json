@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "X Downloader - 本地视频下载",
-  "version": "0.5.0",
+  "version": "0.6.0",
   "description": "在 X/Twitter 页面内检测视频并私密地下载到本地。",
   "permissions": [
     "notifications",

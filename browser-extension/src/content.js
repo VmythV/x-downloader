@@ -226,6 +226,10 @@
         .meta { min-width: 0; }
         .title { overflow: hidden; color: #f7f9f9; font-weight: 600; text-overflow: ellipsis; white-space: nowrap; }
         .detail, .status { margin-top: 3px; color: #8b98a5; font-size: 11px; word-break: break-all; }
+        .job-progress { height: 3px; margin-top: 5px; overflow: hidden; border-radius: 999px; background: #38444d; }
+        .job-progress-value { width: 0; height: 100%; border-radius: inherit; background: #1d9bf0; transition: width .25s ease; }
+        .job-progress.indeterminate .job-progress-value { width: 35%; animation: job-progress 1.15s ease-in-out infinite; }
+        @keyframes job-progress { from { transform: translateX(-110%); } to { transform: translateX(310%); } }
         select { width: 100%; margin-top: 6px; padding: 5px; border: 1px solid #536471; border-radius: 6px; color: #e7e9ea; background: #15202b; }
         .actions { display: flex; gap: 6px; margin-top: 6px; }
         button.action { flex: 1; border: 0; border-radius: 999px; padding: 6px 8px; color: white; background: #1d9bf0; cursor: pointer; }
@@ -885,6 +889,14 @@
         const job = latestJob(candidate.id, select.value);
         const statusText = candidate.uiError || candidate.registrationError || jobStatusText(job);
         meta.appendChild(createTextElement('div', 'status', statusText));
+        if (job && ['queued', 'downloading'].includes(job.status)) {
+          const percent = Math.max(0, Math.min(100, Number(job.progress?.percent || 0)));
+          const progress = createTextElement('div', `job-progress${job.status === 'downloading' && percent <= 0 ? ' indeterminate' : ''}`, '');
+          const value = createTextElement('div', 'job-progress-value', '');
+          if (percent > 0) value.style.width = `${percent}%`;
+          progress.appendChild(value);
+          meta.appendChild(progress);
+        }
         const actions = document.createElement('div');
         actions.className = 'actions';
         const action = downloadButtonState(candidate, job, select.value);
@@ -978,7 +990,9 @@
       : '等待下载';
     case 'downloading': {
       const attempt = job.maxAttempts > 1 ? ` · 第 ${job.attempt}/${job.maxAttempts} 次` : '';
-      return `下载中 ${job.progress?.outTimeSeconds?.toFixed?.(1) || 0}s · ${job.progress?.speed || ''}${attempt}`;
+      const percent = Number(job.progress?.percent || 0);
+      const progress = percent > 0 ? `${percent.toFixed(1)}%` : `${job.progress?.outTimeSeconds?.toFixed?.(1) || 0}s`;
+      return `下载中 ${progress}${job.progress?.speed ? ` · ${job.progress.speed}` : ''}${attempt}`;
     }
       case 'completed': return `已完成 · ${job.outputPath?.split('/').pop() || ''}`;
       case 'failed': return `失败 · ${localizedJobError(job.error)}`;

@@ -6,6 +6,9 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"log/slog"
+	"math"
+	"net/http"
 	"os/exec"
 	"strconv"
 	"strings"
@@ -14,10 +17,18 @@ import (
 )
 
 type FFmpegRunner struct {
-	Path string
+	Path   string
+	Client *http.Client
 }
 
 func (runner FFmpegRunner) Run(ctx context.Context, spec DownloadSpec, onProgress func(Progress)) error {
+	duration, durationErr := probeHLSDuration(ctx, runner.Client, spec.VideoURL, spec.UserAgent)
+	if durationErr != nil {
+		slog.Debug("probe HLS duration", "error", durationErr)
+	}
+	if onProgress != nil {
+		onProgress(Progress{DurationSeconds: duration, Phase: "preparing"})
+	}
 	command := exec.Command(runner.Path, ffmpegArguments(spec)...)
 	prepareProcess(command)
 	stdout, err := command.StdoutPipe()
@@ -33,7 +44,7 @@ func (runner FFmpegRunner) Run(ctx context.Context, spec DownloadSpec, onProgres
 	progressDone := make(chan struct{})
 	go func() {
 		defer close(progressDone)
-		parseProgress(stdout, onProgress)
+		parseProgress(stdout, duration, onProgress)
 	}()
 	waitDone := make(chan error, 1)
 	go func() { waitDone <- command.Wait() }()
@@ -80,12 +91,12 @@ func ffmpegArguments(spec DownloadSpec) []string {
 	)
 }
 
-func parseProgress(reader io.Reader, onProgress func(Progress)) {
+func parseProgress(reader io.Reader, duration float64, onProgress func(Progress)) {
 	if onProgress == nil {
 		return
 	}
 	scanner := bufio.NewScanner(reader)
-	current := Progress{}
+	current := Progress{DurationSeconds: duration, Phase: "downloading"}
 	for scanner.Scan() {
 		line := scanner.Text()
 		key, value, ok := strings.Cut(line, "=")
@@ -99,6 +110,9 @@ func parseProgress(reader io.Reader, onProgress func(Progress)) {
 		case "speed":
 			current.Speed = value
 		case "progress":
+			if duration > 0 {
+				current.Percent = math.Min(99, math.Max(0, current.OutTimeSeconds/duration*100))
+			}
 			onProgress(current)
 		}
 	}

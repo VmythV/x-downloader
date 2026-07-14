@@ -2,6 +2,7 @@
 
 const elements = {
   badge: document.querySelector('#connection-badge'),
+  openDashboard: document.querySelector('#open-dashboard'),
   openSettings: document.querySelector('#open-settings'),
   readinessTitle: document.querySelector('#readiness-title'),
   readinessSummary: document.querySelector('#readiness-summary'),
@@ -79,7 +80,11 @@ function statusText(job) {
   case 'queued': return job.attempt > 0 && job.maxAttempts > 1
     ? `等待重试 ${job.attempt + 1}/${job.maxAttempts}`
     : '等待中';
-  case 'downloading': return `下载中${job.maxAttempts > 1 ? ` ${job.attempt}/${job.maxAttempts}` : ''} ${job.progress?.speed || ''}`.trim();
+  case 'downloading': {
+    const percent = Number(job.progress?.percent || 0);
+    const progress = percent > 0 ? ` ${percent.toFixed(1)}%` : '';
+    return `下载中${progress}${job.maxAttempts > 1 ? ` ${job.attempt}/${job.maxAttempts}` : ''} ${job.progress?.speed || ''}`.trim();
+  }
     case 'completed': return '已完成';
     case 'failed': return '失败';
     case 'cancelled': return '已取消';
@@ -87,11 +92,26 @@ function statusText(job) {
   }
 }
 
+function appendProgress(row, job) {
+  if (!['queued', 'downloading'].includes(job.status)) return;
+  const percent = Math.max(0, Math.min(100, Number(job.progress?.percent || 0)));
+  const track = document.createElement('div');
+  track.className = `job-progress${job.status === 'downloading' && percent <= 0 ? ' indeterminate' : ''}`;
+  const value = document.createElement('div');
+  value.className = 'job-progress-value';
+  if (percent > 0) value.style.width = `${percent}%`;
+  track.appendChild(value);
+  row.appendChild(track);
+}
+
 function localizedJobError(message) {
   const text = String(message || '未知错误')
     .replace(/https:\/\/video\.twimg\.com\/[^\s"']+/gi, '<视频地址>');
   if (/download interrupted because helper restarted/i.test(text)) {
     return 'Helper 重启中断了下载，可以重试';
+  }
+  if (/download resumed after helper restart/i.test(text)) {
+    return 'Helper 重启后已恢复排队';
   }
   if (/ffmpeg/i.test(text) && /not found|executable file|start/i.test(text)) {
     return 'FFmpeg 不可用，请检查安装或路径';
@@ -142,6 +162,7 @@ function renderJobs(jobs) {
       : `${job.width || '?'}×${job.height || '?'} · ${new Date(job.createdAt).toLocaleString()}`;
     detail.title = detail.textContent;
     row.appendChild(detail);
+    appendProgress(row, job);
     const actions = document.createElement('div');
     actions.className = 'job-actions';
     if (job.status === 'completed') {
@@ -196,6 +217,15 @@ elements.refresh.addEventListener('click', refreshAll);
 
 elements.openSettings.addEventListener('click', () => {
   chrome.runtime.openOptionsPage().catch(showError);
+});
+
+elements.openDashboard.addEventListener('click', async () => {
+  try {
+    const settings = await sendMessage({ type: 'helper-settings-get' });
+    await chrome.tabs.create({ url: settings.baseUrl || 'http://127.0.0.1:17890' });
+  } catch (error) {
+    showError(error);
+  }
 });
 
 elements.testHelper.addEventListener('click', async () => {

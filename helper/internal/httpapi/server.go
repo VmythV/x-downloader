@@ -14,10 +14,11 @@ import (
 	"x-downloader/helper/internal/jobs"
 	"x-downloader/helper/internal/media"
 	"x-downloader/helper/internal/settings"
+	"x-downloader/helper/internal/storage"
 )
 
 const maxRequestBodyBytes = 64 << 10
-const APIVersion = "3"
+const APIVersion = "4"
 
 type healthResponse struct {
 	Status     string `json:"status"`
@@ -68,6 +69,7 @@ type updateSettingsRequest struct {
 type Options struct {
 	Readiness Readiness
 	Settings  *settings.Manager
+	Storage   *storage.Database
 }
 
 func New(version, token string, candidates *media.Store, jobManager *jobs.Manager, optionValues ...Options) http.Handler {
@@ -76,6 +78,7 @@ func New(version, token string, candidates *media.Store, jobManager *jobs.Manage
 		options = optionValues[0]
 	}
 	mux := http.NewServeMux()
+	registerDashboardRoutes(mux)
 	mux.HandleFunc("GET /v1/health", func(w http.ResponseWriter, _ *http.Request) {
 		writeJSON(w, http.StatusOK, healthResponse{Status: "ok", Version: version, APIVersion: APIVersion})
 	})
@@ -137,6 +140,9 @@ func New(version, token string, candidates *media.Store, jobManager *jobs.Manage
 			}
 			writeJSON(w, http.StatusOK, map[string]any{"cancelled": false, "downloadDir": path})
 		})))
+	}
+	if options.Storage != nil {
+		registerStorageRoutes(mux, token, options.Storage)
 	}
 	mux.Handle("POST /v1/candidates", requireToken(token, http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
 		var input candidateRequest
@@ -291,6 +297,8 @@ func securityHeaders(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
 		w.Header().Set("Cache-Control", "no-store")
 		w.Header().Set("X-Content-Type-Options", "nosniff")
+		w.Header().Set("Content-Security-Policy", "default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; base-uri 'none'; frame-ancestors 'none'")
+		w.Header().Set("Referrer-Policy", "no-referrer")
 		next.ServeHTTP(w, request)
 	})
 }

@@ -105,7 +105,7 @@ test('保存并测试会校验 token 后持久化 helper 设置', async () => {
   const harness = createBackgroundHarness(async (url, options) => {
     requests.push({ url, options });
     if (url.endsWith('/v1/status')) {
-      return jsonResponse(200, { status: 'ready', version: 'test', apiVersion: '3' });
+      return jsonResponse(200, { status: 'ready', version: 'test', apiVersion: '4' });
     }
     throw new Error(`unexpected URL: ${url}`);
   });
@@ -249,7 +249,7 @@ test('弹窗的测试操作同时提交地址和 token 供保存', async () => {
           return {
             ok: true,
             result: {
-        status: 'ready', version: 'test', apiVersion: '3', candidateCount: 0,
+        status: 'ready', version: 'test', apiVersion: '4', candidateCount: 0,
               jobs: {},
               readiness: {
                 ffmpegReady: true, ffmpegPath: 'ffmpeg', downloadDir: '/tmp',
@@ -305,7 +305,7 @@ test('设置页选择目录后会保存为 Helper 应用设置', async () => {
           return { ok: true, result: { baseUrl: 'http://127.0.0.1:17890', token: 'e'.repeat(32) } };
         }
         if (message.type === 'helper-status') {
-      return { ok: true, result: { status: 'ready', version: 'test', apiVersion: '3' } };
+      return { ok: true, result: { status: 'ready', version: 'test', apiVersion: '4' } };
         }
         if (message.type === 'app-settings-get') {
       return { ok: true, result: {
