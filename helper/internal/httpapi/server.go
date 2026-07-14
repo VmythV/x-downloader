@@ -17,7 +17,7 @@ import (
 )
 
 const maxRequestBodyBytes = 64 << 10
-const APIVersion = "2"
+const APIVersion = "3"
 
 type healthResponse struct {
 	Status     string `json:"status"`
@@ -32,6 +32,7 @@ type Readiness struct {
 	DownloadDirWritable bool   `json:"downloadDirWritable"`
 	ProxyConfigured     bool   `json:"proxyConfigured"`
 	Concurrency         int    `json:"concurrency"`
+	RetryCount          int    `json:"retryCount"`
 	PersistenceEnabled  bool   `json:"persistenceEnabled"`
 }
 
@@ -47,16 +48,21 @@ type statusResponse struct {
 
 type candidateRequest struct {
 	MasterURL string        `json:"masterUrl"`
+	UserAgent string        `json:"userAgent,omitempty"`
 	Context   media.Context `json:"context"`
 }
 
 type createJobRequest struct {
 	CandidateID string `json:"candidateId"`
 	VariantID   string `json:"variantId,omitempty"`
+	UserAgent   string `json:"userAgent,omitempty"`
 }
 
 type updateSettingsRequest struct {
-	DownloadDir string `json:"downloadDir"`
+	DownloadDir      *string `json:"downloadDir,omitempty"`
+	FilenameTemplate *string `json:"filenameTemplate,omitempty"`
+	Concurrency      *int    `json:"concurrency,omitempty"`
+	RetryCount       *int    `json:"retryCount,omitempty"`
 }
 
 type Options struct {
@@ -79,6 +85,8 @@ func New(version, token string, candidates *media.Store, jobManager *jobs.Manage
 			current := options.Settings.Get()
 			readiness.DownloadDir = current.DownloadDir
 			readiness.DownloadDirWritable = downloadpath.Writable(current.DownloadDir)
+			readiness.Concurrency = current.Concurrency
+			readiness.RetryCount = current.RetryCount
 		}
 		issues := make([]string, 0, 2)
 		if !readiness.FFmpegReady {
@@ -106,7 +114,10 @@ func New(version, token string, candidates *media.Store, jobManager *jobs.Manage
 				writeError(w, http.StatusBadRequest, err)
 				return
 			}
-			updated, err := options.Settings.UpdateDownloadDir(input.DownloadDir)
+			updated, err := options.Settings.Update(settings.Update{
+				DownloadDir: input.DownloadDir, FilenameTemplate: input.FilenameTemplate,
+				Concurrency: input.Concurrency, RetryCount: input.RetryCount,
+			})
 			if err != nil {
 				writeError(w, http.StatusBadRequest, err)
 				return
@@ -133,7 +144,7 @@ func New(version, token string, candidates *media.Store, jobManager *jobs.Manage
 			writeError(w, http.StatusBadRequest, err)
 			return
 		}
-		candidate, err := candidates.Register(request.Context(), input.MasterURL, input.Context)
+		candidate, err := candidates.Register(request.Context(), input.MasterURL, input.UserAgent, input.Context)
 		if err != nil {
 			slog.Warn("candidate registration failed", "postId", input.Context.PostID, "error", redactVideoURLs(err.Error()))
 			writeError(w, http.StatusBadRequest, err)
@@ -157,6 +168,12 @@ func New(version, token string, candidates *media.Store, jobManager *jobs.Manage
 		if err := decodeJSON(w, request, &input); err != nil {
 			writeError(w, http.StatusBadRequest, err)
 			return
+		}
+		if input.UserAgent != "" {
+			if err := candidates.UpdateUserAgent(input.CandidateID, input.UserAgent); err != nil {
+				writeDomainError(w, err)
+				return
+			}
 		}
 		job, err := jobManager.Submit(input.CandidateID, input.VariantID)
 		if err != nil {

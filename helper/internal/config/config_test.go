@@ -25,3 +25,14 @@ func TestRejectsNonLoopbackAddress(t *testing.T) {
 		t.Fatal("expected non-loopback listen address to be rejected")
 	}
 }
+
+func TestRejectsRetryCountAboveLimit(t *testing.T) {
+	cfg, err := Default()
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg.RetryCount = 6
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("expected retry count above five to be rejected")
+	}
+}

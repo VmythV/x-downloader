@@ -23,7 +23,10 @@ import (
 	"x-downloader/helper/internal/statefile"
 )
 
-const defaultMaxJobs = 500
+const (
+	defaultMaxJobs = 500
+	maxConcurrency = 4
+)
 
 type CandidateSource interface {
 	Get(id string) (media.Candidate, error)
@@ -37,6 +40,7 @@ var (
 type DownloadSpec struct {
 	VideoURL   string
 	AudioURL   string
+	UserAgent  string
 	OutputPath string
 }
 
@@ -60,6 +64,8 @@ type Job struct {
 	Progress    Progress   `json:"progress"`
 	OutputPath  string     `json:"outputPath,omitempty"`
 	Error       string     `json:"error,omitempty"`
+	Attempt     int        `json:"attempt,omitempty"`
+	MaxAttempts int        `json:"maxAttempts,omitempty"`
 	CreatedAt   time.Time  `json:"createdAt"`
 	StartedAt   *time.Time `json:"startedAt,omitempty"`
 	FinishedAt  *time.Time `json:"finishedAt,omitempty"`
@@ -76,6 +82,10 @@ type jobState struct {
 type Manager struct {
 	mu               sync.RWMutex
 	persistMu        sync.Mutex
+	limitMu          sync.Mutex
+	limitCond        *sync.Cond
+	concurrency      int
+	activeWorkers    int
 	jobs             map[string]*jobState
 	bySelection      map[string]string
 	queue            chan string
@@ -84,6 +94,8 @@ type Manager struct {
 	downloadDir      string
 	tempDir          string
 	filenameTemplate string
+	retryCount       int
+	retryDelay       func(int) time.Duration
 	stateFile        string
 	maxJobs          int
 }
@@ -134,13 +146,18 @@ func newManager(concurrency int, downloadDir, tempDir, filenameTemplate, stateFi
 		downloadDir:      downloadDir,
 		tempDir:          tempDir,
 		filenameTemplate: filenameTemplate,
-		stateFile:        stateFile,
-		maxJobs:          maxJobs,
+		concurrency:      concurrency,
+		retryDelay: func(attempt int) time.Duration {
+			return time.Duration(1<<min(max(attempt-1, 0), 3)) * time.Second
+		},
+		stateFile: stateFile,
+		maxJobs:   maxJobs,
 	}
+	manager.limitCond = sync.NewCond(&manager.limitMu)
 	if err := manager.restore(); err != nil {
 		return nil, err
 	}
-	for range concurrency {
+	for range maxConcurrency {
 		go manager.worker()
 	}
 	return manager, nil
@@ -149,6 +166,31 @@ func newManager(concurrency int, downloadDir, tempDir, filenameTemplate, stateFi
 func (manager *Manager) SetDownloadDir(path string) {
 	manager.mu.Lock()
 	manager.downloadDir = filepath.Clean(path)
+	manager.mu.Unlock()
+}
+
+func (manager *Manager) SetFilenameTemplate(value string) {
+	manager.mu.Lock()
+	manager.filenameTemplate = value
+	manager.mu.Unlock()
+}
+
+func (manager *Manager) SetConcurrency(value int) {
+	if value < 1 || value > maxConcurrency {
+		return
+	}
+	manager.limitMu.Lock()
+	manager.concurrency = value
+	manager.limitCond.Broadcast()
+	manager.limitMu.Unlock()
+}
+
+func (manager *Manager) SetRetryCount(value int) {
+	if value < 0 || value > 5 {
+		return
+	}
+	manager.mu.Lock()
+	manager.retryCount = value
 	manager.mu.Unlock()
 }
 
@@ -242,7 +284,8 @@ func (manager *Manager) Submit(candidateID, variantID string) (Job, error) {
 	state := &jobState{
 		job: Job{
 			ID: id, CandidateID: candidate.ID, VariantID: variant.ID, MediaID: candidate.MediaID,
-			Width: variant.Width, Height: variant.Height, Status: "queued", OutputPath: outputPath, CreatedAt: now,
+			Width: variant.Width, Height: variant.Height, Status: "queued", OutputPath: outputPath,
+			MaxAttempts: manager.retryCount + 1, CreatedAt: now,
 		},
 		candidate: candidate,
 		variant:   variant,
@@ -412,8 +455,26 @@ func (manager *Manager) Reveal(id string) error {
 
 func (manager *Manager) worker() {
 	for id := range manager.queue {
+		manager.acquireWorkerSlot()
 		manager.run(id)
+		manager.releaseWorkerSlot()
 	}
+}
+
+func (manager *Manager) acquireWorkerSlot() {
+	manager.limitMu.Lock()
+	defer manager.limitMu.Unlock()
+	for manager.activeWorkers >= manager.concurrency {
+		manager.limitCond.Wait()
+	}
+	manager.activeWorkers++
+}
+
+func (manager *Manager) releaseWorkerSlot() {
+	manager.limitMu.Lock()
+	manager.activeWorkers--
+	manager.limitCond.Broadcast()
+	manager.limitMu.Unlock()
 }
 
 func (manager *Manager) run(id string) {
@@ -427,7 +488,11 @@ func (manager *Manager) run(id string) {
 	now := time.Now().UTC()
 	state.cancel = cancel
 	state.job.Status = "downloading"
+	state.job.Attempt++
+	state.job.Error = ""
+	state.job.Progress = Progress{}
 	state.job.StartedAt = &now
+	state.job.FinishedAt = nil
 	videoURL := state.variant.URL
 	audioURL := state.variant.Audio.URL
 	tempPath := state.tempPath
@@ -435,13 +500,14 @@ func (manager *Manager) run(id string) {
 	candidateID := state.job.CandidateID
 	variantID := state.job.VariantID
 	outputPath := state.job.OutputPath
+	userAgent := state.candidate.UserAgent
 	manager.mu.Unlock()
 	manager.persistBestEffort()
 
 	slog.Info("download started", "jobId", jobID, "candidateId", candidateID, "variantId", variantID, "outputPath", outputPath)
 
 	err := manager.runner.Run(ctx, DownloadSpec{
-		VideoURL: videoURL, AudioURL: audioURL, OutputPath: tempPath,
+		VideoURL: videoURL, AudioURL: audioURL, UserAgent: userAgent, OutputPath: tempPath,
 	}, func(progress Progress) {
 		manager.mu.Lock()
 		if current := manager.jobs[id]; current != nil {
@@ -468,6 +534,22 @@ func (manager *Manager) run(id string) {
 		state.job.Status = "cancelled"
 		_ = os.Remove(tempPath)
 		slog.Info("download cancelled", "jobId", jobID, "candidateId", candidateID)
+	} else if err != nil && state.job.Attempt < state.job.MaxAttempts {
+		attempt := state.job.Attempt
+		maxAttempts := state.job.MaxAttempts
+		state.job.Status = "queued"
+		state.job.Error = ""
+		state.job.FinishedAt = nil
+		_ = os.Remove(tempPath)
+		persistErr := manager.persistLocked()
+		manager.mu.Unlock()
+		manager.persistMu.Unlock()
+		if persistErr != nil {
+			slog.Warn("persist retried job state", "jobId", jobID, "error", persistErr)
+		}
+		slog.Warn("download attempt failed; retry scheduled", "jobId", jobID, "candidateId", candidateID, "attempt", attempt, "maxAttempts", maxAttempts, "error", summarizeDownloadError(err))
+		manager.scheduleRetry(id, attempt)
+		return
 	} else if err != nil {
 		state.job.Status = "failed"
 		state.job.Error = err.Error()
@@ -492,6 +574,18 @@ func (manager *Manager) run(id string) {
 	if persistErr != nil {
 		slog.Warn("persist terminal job state", "jobId", jobID, "error", persistErr)
 	}
+}
+
+func (manager *Manager) scheduleRetry(id string, attempt int) {
+	time.AfterFunc(manager.retryDelay(attempt), func() {
+		manager.mu.RLock()
+		state := manager.jobs[id]
+		queued := state != nil && state.job.Status == "queued"
+		manager.mu.RUnlock()
+		if queued {
+			manager.queue <- id
+		}
+	})
 }
 
 func summarizeDownloadError(err error) string {

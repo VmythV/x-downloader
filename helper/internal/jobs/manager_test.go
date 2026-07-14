@@ -2,8 +2,10 @@ package jobs
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 
@@ -14,6 +16,16 @@ import (
 type fakeCandidates struct{ candidate media.Candidate }
 
 func (source fakeCandidates) Get(id string) (media.Candidate, error) { return source.candidate, nil }
+
+type candidateMap map[string]media.Candidate
+
+func (source candidateMap) Get(id string) (media.Candidate, error) {
+	candidate, ok := source[id]
+	if !ok {
+		return media.Candidate{}, media.ErrCandidateNotFound
+	}
+	return candidate, nil
+}
 
 type fakeRunner struct{}
 
@@ -105,6 +117,7 @@ func TestManagerUsesUpdatedDownloadDirectoryForNewJobs(t *testing.T) {
 	}
 	updatedDir := filepath.Join(root, "updated")
 	manager.SetDownloadDir(updatedDir)
+	manager.SetFilenameTemplate("custom_{mediaId}.{ext}")
 	job, err := manager.Submit(candidate.ID, "")
 	if err != nil {
 		t.Fatal(err)
@@ -112,4 +125,116 @@ func TestManagerUsesUpdatedDownloadDirectoryForNewJobs(t *testing.T) {
 	if filepath.Dir(job.OutputPath) != updatedDir {
 		t.Fatalf("new job did not use updated directory: %s", job.OutputPath)
 	}
+	if filepath.Base(job.OutputPath) != "custom_789.mp4" {
+		t.Fatalf("new job did not use updated filename template: %s", job.OutputPath)
+	}
+}
+
+type retryRunner struct {
+	mu       sync.Mutex
+	attempts int
+}
+
+func (runner *retryRunner) Run(_ context.Context, spec DownloadSpec, _ func(Progress)) error {
+	runner.mu.Lock()
+	runner.attempts++
+	attempt := runner.attempts
+	runner.mu.Unlock()
+	if attempt == 1 {
+		return errors.New("temporary network failure")
+	}
+	return os.WriteFile(spec.OutputPath, []byte("mp4"), 0o600)
+}
+
+func TestManagerRetriesFailedDownload(t *testing.T) {
+	audio := &hls.Audio{URL: "https://video.twimg.com/audio.m3u8"}
+	candidate := media.Candidate{
+		ID: "media-retry", MediaID: "901",
+		Variants: []hls.Variant{{ID: "highest", URL: "https://video.twimg.com/video.m3u8", Width: 1280, Height: 720, Audio: audio}},
+	}
+	runner := &retryRunner{}
+	root := t.TempDir()
+	manager, err := NewManager(1, filepath.Join(root, "downloads"), filepath.Join(root, "temp"), "{mediaId}.{ext}", fakeCandidates{candidate}, runner)
+	if err != nil {
+		t.Fatal(err)
+	}
+	manager.SetRetryCount(1)
+	manager.retryDelay = func(int) time.Duration { return 0 }
+	job, err := manager.Submit(candidate.ID, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		job, _ = manager.Get(job.ID)
+		if job.Status == "completed" {
+			break
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	if job.Status != "completed" || job.Attempt != 2 || job.MaxAttempts != 2 {
+		t.Fatalf("job was not retried once: %+v", job)
+	}
+}
+
+type blockingRunner struct {
+	started chan struct{}
+	release chan struct{}
+}
+
+func (runner blockingRunner) Run(_ context.Context, spec DownloadSpec, _ func(Progress)) error {
+	runner.started <- struct{}{}
+	<-runner.release
+	return os.WriteFile(spec.OutputPath, []byte("mp4"), 0o600)
+}
+
+func TestManagerAppliesIncreasedConcurrency(t *testing.T) {
+	audio := &hls.Audio{URL: "https://video.twimg.com/audio.m3u8"}
+	variant := func(id string) []hls.Variant {
+		return []hls.Variant{{ID: "highest", URL: "https://video.twimg.com/" + id + "/video.m3u8", Width: 1280, Height: 720, Audio: audio}}
+	}
+	source := candidateMap{
+		"media-one": {ID: "media-one", MediaID: "1001", Variants: variant("1001")},
+		"media-two": {ID: "media-two", MediaID: "1002", Variants: variant("1002")},
+	}
+	runner := blockingRunner{started: make(chan struct{}, 2), release: make(chan struct{})}
+	var releaseOnce sync.Once
+	release := func() { releaseOnce.Do(func() { close(runner.release) }) }
+	t.Cleanup(release)
+	root := t.TempDir()
+	manager, err := NewManager(1, filepath.Join(root, "downloads"), filepath.Join(root, "temp"), "{mediaId}.{ext}", source, runner)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := manager.Submit("media-one", ""); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := manager.Submit("media-two", ""); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-runner.started:
+	case <-time.After(time.Second):
+		t.Fatal("first download did not start")
+	}
+	select {
+	case <-runner.started:
+		t.Fatal("second download started before concurrency was increased")
+	case <-time.After(50 * time.Millisecond):
+	}
+	manager.SetConcurrency(2)
+	select {
+	case <-runner.started:
+	case <-time.After(time.Second):
+		t.Fatal("second download did not start after concurrency was increased")
+	}
+	release()
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		if manager.Stats()["completed"] == 2 {
+			return
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	t.Fatalf("downloads did not complete after release: %+v", manager.List())
 }

@@ -72,7 +72,10 @@ func newTestEnvironment(t *testing.T) testEnvironment {
 	pickedDir := filepath.Join(root, "picked-downloads")
 	appSettings, err := settings.New(
 		filepath.Join(root, "state", "settings.json"),
-		filepath.Join(root, "downloads"),
+		settings.Defaults{
+			DownloadDir: filepath.Join(root, "downloads"), FilenameTemplate: "{postId}_{mediaId}_{height}p.{ext}",
+			Concurrency: 1, RetryCount: 1,
+		},
 		folderpicker.PickerFunc(func(context.Context) (string, error) { return pickedDir, nil }),
 	)
 	if err != nil {
@@ -114,7 +117,7 @@ func TestStatusReportsAuthenticatedReadiness(t *testing.T) {
 	request.Header.Set("Authorization", "Bearer test-secret-token-value-1234567890")
 	response := httptest.NewRecorder()
 	handler.ServeHTTP(response, request)
-	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `"apiVersion":"2"`) {
+	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `"apiVersion":"3"`) {
 		t.Fatalf("unexpected status response: %d %s", response.Code, response.Body.String())
 	}
 }
@@ -131,20 +134,24 @@ func TestSettingsPickUpdateAndRestoreDownloadDirectory(t *testing.T) {
 		t.Fatalf("unexpected picker response: %d %s", pickResponse.Code, pickResponse.Body.String())
 	}
 
-	updateBody := `{"downloadDir":` + strconv.Quote(environment.pickedDir) + `}`
+	updateBody := `{"downloadDir":` + strconv.Quote(environment.pickedDir) + `,"filenameTemplate":"custom_{mediaId}.{ext}","concurrency":3,"retryCount":2}`
 	updateRequest := httptest.NewRequest(http.MethodPut, "/v1/settings", strings.NewReader(updateBody))
 	updateRequest.Header.Set("Authorization", token)
 	updateResponse := httptest.NewRecorder()
 	environment.handler.ServeHTTP(updateResponse, updateRequest)
-	if updateResponse.Code != http.StatusOK || environment.appSettings.Get().DownloadDir != environment.pickedDir {
+	updated := environment.appSettings.Get()
+	if updateResponse.Code != http.StatusOK || updated.DownloadDir != environment.pickedDir || updated.FilenameTemplate != "custom_{mediaId}.{ext}" || updated.Concurrency != 3 || updated.RetryCount != 2 {
 		t.Fatalf("unexpected update response: %d %s", updateResponse.Code, updateResponse.Body.String())
 	}
 
-	restored, err := settings.New(filepath.Join(environment.root, "state", "settings.json"), filepath.Join(environment.root, "downloads"), nil)
+	restored, err := settings.New(filepath.Join(environment.root, "state", "settings.json"), settings.Defaults{
+		DownloadDir: filepath.Join(environment.root, "downloads"), FilenameTemplate: "{postId}_{mediaId}_{height}p.{ext}",
+		Concurrency: 1, RetryCount: 1,
+	}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if restored.Get().DownloadDir != environment.pickedDir {
+	if restored.Get().Values != updated.Values {
 		t.Fatalf("updated directory was not restored: %+v", restored.Get())
 	}
 }
@@ -153,7 +160,7 @@ func TestCandidateDownloadAPIFlow(t *testing.T) {
 	handler := newTestHandler(t)
 	token := "Bearer test-secret-token-value-1234567890"
 	masterURL := "https://video.twimg.com/amplify_video/2076268346560196608/pl/master.m3u8"
-	body := `{"masterUrl":"` + masterURL + `","context":{"postUrl":"https://x.com/test/status/123456","postId":"123456","author":"test","mediaIndex":1}}`
+	body := `{"masterUrl":"` + masterURL + `","userAgent":"Mozilla/5.0 TestBrowser/3","context":{"postUrl":"https://x.com/test/status/123456","postId":"123456","author":"test","mediaIndex":1}}`
 	createCandidate := httptest.NewRequest(http.MethodPost, "/v1/candidates", strings.NewReader(body))
 	createCandidate.Header.Set("Authorization", token)
 	candidateResponse := httptest.NewRecorder()
@@ -164,6 +171,9 @@ func TestCandidateDownloadAPIFlow(t *testing.T) {
 	var candidate media.Candidate
 	if err := json.Unmarshal(candidateResponse.Body.Bytes(), &candidate); err != nil || len(candidate.Variants) != 1 {
 		t.Fatalf("decode candidate: %v, body=%s", err, candidateResponse.Body.String())
+	}
+	if candidate.UserAgent != "Mozilla/5.0 TestBrowser/3" {
+		t.Fatalf("browser user agent was not retained: %q", candidate.UserAgent)
 	}
 
 	jobBody := `{"candidateId":"` + candidate.ID + `","variantId":"` + candidate.Variants[0].ID + `"}`

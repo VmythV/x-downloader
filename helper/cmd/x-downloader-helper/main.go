@@ -54,20 +54,24 @@ func main() {
 		slog.Error("initialize media store", "error", err)
 		os.Exit(1)
 	}
-	appSettings, err := settings.New(filepath.Join(cfg.StateDir, "settings.json"), cfg.DownloadDir, nil)
+	appSettings, err := settings.New(filepath.Join(cfg.StateDir, "settings.json"), settings.Defaults{
+		DownloadDir: cfg.DownloadDir, FilenameTemplate: cfg.FilenameTemplate,
+		Concurrency: cfg.Concurrency, RetryCount: cfg.RetryCount,
+	}, nil)
 	if err != nil {
 		slog.Error("initialize application settings", "error", err)
 		os.Exit(1)
 	}
-	activeDownloadDir := appSettings.Get().DownloadDir
+	activeSettings := appSettings.Get()
+	activeDownloadDir := activeSettings.DownloadDir
 	if _, err := downloadpath.Prepare(activeDownloadDir); err != nil {
 		slog.Warn("download directory is currently unavailable; change it from extension settings", "path", activeDownloadDir, "error", err)
 	}
 	jobManager, err := jobs.NewPersistentManager(
-		cfg.Concurrency,
+		activeSettings.Concurrency,
 		activeDownloadDir,
 		cfg.TempDir,
-		cfg.FilenameTemplate,
+		activeSettings.FilenameTemplate,
 		filepath.Join(cfg.StateDir, "jobs.json"),
 		500,
 		mediaStore,
@@ -89,7 +93,7 @@ func main() {
 			Settings: appSettings,
 			Readiness: httpapi.Readiness{
 				FFmpegReady: ffmpegErr == nil, FFmpegPath: ffmpegPath,
-				ProxyConfigured: proxyConfigured(), Concurrency: cfg.Concurrency, PersistenceEnabled: true,
+				ProxyConfigured: proxyConfigured(), PersistenceEnabled: true,
 			},
 		}),
 		ReadHeaderTimeout: 5 * time.Second,
@@ -117,7 +121,8 @@ func main() {
 		"downloadDir", activeDownloadDir,
 		"tempDir", cfg.TempDir,
 		"stateDir", cfg.StateDir,
-		"concurrency", cfg.Concurrency,
+		"concurrency", activeSettings.Concurrency,
+		"retryCount", activeSettings.RetryCount,
 		"ffmpegPath", cfg.FFmpegPath,
 		"proxyConfigured", proxyConfigured(),
 	)

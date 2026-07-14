@@ -6,5 +6,6 @@
   "tokenFile": "~/Library/Application Support/x-downloader/token",
   "ffmpegPath": "ffmpeg",
   "concurrency": 1,
+  "retryCount": 1,
   "filenameTemplate": "{date}_{author}_{postId}_{mediaIndex}_{mediaId}_{height}p.{ext}"
 }

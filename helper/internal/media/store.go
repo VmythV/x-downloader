@@ -15,6 +15,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"x-downloader/helper/internal/hls"
 	"x-downloader/helper/internal/statefile"
@@ -22,6 +23,7 @@ import (
 
 const maxMasterBytes = 2 << 20
 const defaultMaxCandidates = 300
+const fallbackUserAgent = "X-Downloader-Helper/0.5"
 
 var numericID = regexp.MustCompile(`^\d+$`)
 
@@ -41,6 +43,7 @@ type Candidate struct {
 	ID           string        `json:"id"`
 	MediaID      string        `json:"mediaId"`
 	MasterURL    string        `json:"masterUrl"`
+	UserAgent    string        `json:"userAgent,omitempty"`
 	Variants     []hls.Variant `json:"variants"`
 	Context      Context       `json:"context"`
 	DiscoveredAt time.Time     `json:"discoveredAt"`
@@ -104,7 +107,7 @@ func newStore(client *http.Client, stateFile string, maxCandidates int) *Store {
 	}
 }
 
-func (store *Store) Register(ctx context.Context, masterURL string, pageContext Context) (Candidate, error) {
+func (store *Store) Register(ctx context.Context, masterURL, userAgent string, pageContext Context) (Candidate, error) {
 	parsedURL, err := hls.ValidatePlaylistURL(masterURL)
 	if err != nil {
 		return Candidate{}, err
@@ -118,10 +121,15 @@ func (store *Store) Register(ctx context.Context, masterURL string, pageContext 
 		return Candidate{}, err
 	}
 	id := "media-" + mediaID
+	userAgent, err = NormalizeUserAgent(userAgent)
+	if err != nil {
+		return Candidate{}, err
+	}
 
 	store.mu.Lock()
 	if existing, ok := store.candidates[id]; ok && existing.MasterURL == parsedURL.String() {
 		existing.Context = mergeContext(existing.Context, cleanContext)
+		existing.UserAgent = userAgent
 		store.candidates[id] = existing
 		store.mu.Unlock()
 		if err := store.persist(); err != nil {
@@ -136,7 +144,7 @@ func (store *Store) Register(ctx context.Context, masterURL string, pageContext 
 	if err != nil {
 		return Candidate{}, err
 	}
-	request.Header.Set("User-Agent", "X-Downloader-Helper/0.4")
+	request.Header.Set("User-Agent", userAgent)
 	request.Header.Set("Referer", "https://x.com/")
 	response, err := store.client.Do(request)
 	if err != nil {
@@ -162,6 +170,7 @@ func (store *Store) Register(ctx context.Context, masterURL string, pageContext 
 		ID:           id,
 		MediaID:      mediaID,
 		MasterURL:    parsedURL.String(),
+		UserAgent:    userAgent,
 		Variants:     master.Variants,
 		Context:      cleanContext,
 		DiscoveredAt: time.Now().UTC(),
@@ -184,6 +193,39 @@ func (store *Store) Register(ctx context.Context, masterURL string, pageContext 
 		"variants", len(candidate.Variants),
 	)
 	return candidate, nil
+}
+
+func NormalizeUserAgent(value string) (string, error) {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return fallbackUserAgent, nil
+	}
+	if len(value) > 512 || !utf8.ValidString(value) {
+		return "", errors.New("browser user agent is invalid")
+	}
+	for _, char := range value {
+		if char < 0x20 || char == 0x7f {
+			return "", errors.New("browser user agent contains control characters")
+		}
+	}
+	return value, nil
+}
+
+func (store *Store) UpdateUserAgent(id, value string) error {
+	userAgent, err := NormalizeUserAgent(value)
+	if err != nil {
+		return err
+	}
+	store.mu.Lock()
+	candidate, ok := store.candidates[id]
+	if !ok {
+		store.mu.Unlock()
+		return ErrCandidateNotFound
+	}
+	candidate.UserAgent = userAgent
+	store.candidates[id] = candidate
+	store.mu.Unlock()
+	return store.persist()
 }
 
 func (store *Store) Get(id string) (Candidate, error) {

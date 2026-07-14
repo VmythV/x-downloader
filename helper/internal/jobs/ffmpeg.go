@@ -18,16 +18,7 @@ type FFmpegRunner struct {
 }
 
 func (runner FFmpegRunner) Run(ctx context.Context, spec DownloadSpec, onProgress func(Progress)) error {
-	args := []string{
-		"-hide_banner", "-nostdin", "-loglevel", "warning",
-		"-progress", "pipe:1", "-nostats",
-		"-i", spec.VideoURL,
-		"-i", spec.AudioURL,
-		"-map", "0:v:0", "-map", "1:a:0",
-		"-c", "copy", "-movflags", "+faststart",
-		"-y", spec.OutputPath,
-	}
-	command := exec.Command(runner.Path, args...)
+	command := exec.Command(runner.Path, ffmpegArguments(spec)...)
 	prepareProcess(command)
 	stdout, err := command.StdoutPipe()
 	if err != nil {
@@ -69,6 +60,24 @@ func (runner FFmpegRunner) Run(ctx context.Context, spec DownloadSpec, onProgres
 		<-progressDone
 		return context.Canceled
 	}
+}
+
+func ffmpegArguments(spec DownloadSpec) []string {
+	args := []string{
+		"-hide_banner", "-nostdin", "-loglevel", "warning",
+		"-progress", "pipe:1", "-nostats",
+	}
+	for _, input := range []string{spec.VideoURL, spec.AudioURL} {
+		if spec.UserAgent != "" {
+			args = append(args, "-user_agent", spec.UserAgent)
+		}
+		args = append(args, "-i", input)
+	}
+	return append(args,
+		"-map", "0:v:0", "-map", "1:a:0",
+		"-c", "copy", "-movflags", "+faststart",
+		"-y", spec.OutputPath,
+	)
 }
 
 func parseProgress(reader io.Reader, onProgress func(Progress)) {

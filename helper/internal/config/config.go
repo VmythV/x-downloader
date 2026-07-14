@@ -20,6 +20,7 @@ type Config struct {
 	TokenFile        string `json:"tokenFile"`
 	FFmpegPath       string `json:"ffmpegPath"`
 	Concurrency      int    `json:"concurrency"`
+	RetryCount       int    `json:"retryCount"`
 	FilenameTemplate string `json:"filenameTemplate"`
 }
 
@@ -43,6 +44,7 @@ func Default() (Config, error) {
 		TokenFile:        filepath.Join(appConfigDir, "token"),
 		FFmpegPath:       "ffmpeg",
 		Concurrency:      1,
+		RetryCount:       1,
 		FilenameTemplate: defaultFilenameTemplate,
 	}, nil
 }
@@ -109,11 +111,17 @@ func (cfg Config) Validate() error {
 	if cfg.Concurrency < 1 || cfg.Concurrency > 4 {
 		return errors.New("concurrency must be between 1 and 4")
 	}
+	if cfg.RetryCount < 0 || cfg.RetryCount > 5 {
+		return errors.New("retry count must be between 0 and 5")
+	}
 	if strings.TrimSpace(cfg.FFmpegPath) == "" {
 		return errors.New("FFmpeg path must not be empty")
 	}
 	if strings.TrimSpace(cfg.FilenameTemplate) == "" {
 		return errors.New("filename template must not be empty")
+	}
+	if len(cfg.FilenameTemplate) > 512 {
+		return errors.New("filename template must not exceed 512 bytes")
 	}
 	if strings.ContainsAny(cfg.FilenameTemplate, `/\\`) {
 		return errors.New("filename template must not contain path separators")
