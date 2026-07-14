@@ -1,0 +1,7 @@
+browser-extension/dist/
+browser-extension/node_modules/
+helper/bin/
+helper/x-downloader-helper
+helper/config.json
+*.log
+.DS_Store

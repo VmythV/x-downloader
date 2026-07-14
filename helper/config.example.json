@@ -1,0 +1,10 @@
+{
+  "listenAddress": "127.0.0.1:17890",
+  "downloadDir": "~/Downloads/X-Media",
+  "tempDir": "~/Downloads/X-Media/.partial",
+  "diagnosticsDir": "~/Library/Application Support/x-downloader/diagnostics",
+  "tokenFile": "~/Library/Application Support/x-downloader/token",
+  "ffmpegPath": "ffmpeg",
+  "concurrency": 1,
+  "filenameTemplate": "{date}_{author}_{postId}_{mediaIndex}_{mediaId}_{height}p.{ext}"
+}

@@ -1,0 +1,59 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>X Downloader 诊断</title>
+    <link rel="stylesheet" href="popup.css">
+  </head>
+  <body>
+    <main>
+      <h1>X Downloader</h1>
+      <p class="subtitle">HLS 捕获诊断</p>
+
+      <label>
+        Helper 地址
+        <input id="helper-url" type="url" value="http://127.0.0.1:17890" spellcheck="false">
+      </label>
+
+      <label>
+        配对令牌
+        <input id="helper-token" type="password" autocomplete="off" spellcheck="false">
+      </label>
+
+      <div class="row">
+        <button id="test-helper" type="button" class="secondary">保存并测试</button>
+        <span id="connection-status" class="muted"></span>
+      </div>
+
+      <hr>
+
+      <label>
+        诊断时长（秒）
+        <input id="duration" type="number" value="15" min="5" max="120">
+      </label>
+
+      <div class="row actions">
+        <button id="start" type="button">开始诊断</button>
+        <button id="finish" type="button" class="secondary" disabled>提前结束</button>
+      </div>
+
+      <section id="status-card" class="status-card">
+        <strong id="status-title">尚未运行</strong>
+        <div id="status-details" class="muted">在 X 页面播放视频后启动诊断。</div>
+      </section>
+
+      <section id="report-section" hidden>
+        <h2>诊断结果</h2>
+        <div id="report-summary"></div>
+        <details>
+          <summary>查看完整报告</summary>
+          <pre id="report-json"></pre>
+        </details>
+      </section>
+
+      <p id="error" class="error" role="alert"></p>
+    </main>
+    <script src="popup.js"></script>
+  </body>
+</html>

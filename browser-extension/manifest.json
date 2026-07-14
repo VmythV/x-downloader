@@ -1,0 +1,72 @@
+{
+  "manifest_version": 3,
+  "name": "X Media Downloader",
+  "version": "0.2.0",
+  "description": "Detect X/Twitter HLS media and force the highest available playback quality.",
+  "permissions": [
+    "activeTab",
+    "alarms",
+    "storage",
+    "webRequest"
+  ],
+  "host_permissions": [
+    "https://x.com/*",
+    "https://*.x.com/*",
+    "https://twitter.com/*",
+    "https://*.twitter.com/*",
+    "https://video.twimg.com/*",
+    "http://127.0.0.1/*"
+  ],
+  "action": {
+    "default_popup": "popup/popup.html",
+    "default_title": "X Downloader 诊断"
+  },
+  "background": {
+    "service_worker": "src/background.js"
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "https://x.com/*",
+        "https://mobile.x.com/*",
+        "https://pro.x.com/*",
+        "https://twitter.com/*",
+        "https://mobile.twitter.com/*",
+        "https://pro.twitter.com/*"
+      ],
+      "exclude_matches": [
+        "https://x.com/i/cards-frame/*",
+        "https://*.x.com/i/cards-frame/*",
+        "https://twitter.com/i/cards-frame/*",
+        "https://*.twitter.com/i/cards-frame/*"
+      ],
+      "js": [
+        "src/tray-core.js",
+        "src/content.js"
+      ],
+      "run_at": "document_start"
+    },
+    {
+      "matches": [
+        "https://x.com/*",
+        "https://mobile.x.com/*",
+        "https://pro.x.com/*",
+        "https://twitter.com/*",
+        "https://mobile.twitter.com/*",
+        "https://pro.twitter.com/*"
+      ],
+      "exclude_matches": [
+        "https://x.com/i/cards-frame/*",
+        "https://*.x.com/i/cards-frame/*",
+        "https://twitter.com/i/cards-frame/*",
+        "https://*.twitter.com/i/cards-frame/*"
+      ],
+      "js": [
+        "src/hls-core.js",
+        "src/page-main.js"
+      ],
+      "run_at": "document_start",
+      "world": "MAIN"
+    }
+  ]
+}
