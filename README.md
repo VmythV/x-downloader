@@ -1,27 +1,59 @@
 # X Downloader
 
-一个由浏览器插件和本地 Go helper 组成的 X/Twitter HLS 媒体下载工具。
+X Downloader 是一个由 Chromium 扩展和本地 Go Helper 组成的 X/Twitter 视频下载工具。视频在 X 页面内识别，由本机 Helper 获取 HLS 并调用 FFmpeg 无损封装为 MP4。
 
-## 目录
+它的核心原则是：媒体不上传、不读取浏览器 Cookie、不解析私有 GraphQL，下载路径和任务状态只保存在本机。
 
-```text
-browser-extension/  Chromium Manifest V3 插件
-helper/             本地 Go 服务
-docs/               架构和技术方案
+## 功能
+
+- 在 X/Twitter 页面内检测公开 HLS 视频，同时覆盖 XHR 和 Fetch 请求。
+- `列表`模式按帖子展示缩略图、分辨率和下载状态。
+- `帖内`模式在帖子操作栏加入下载按钮；多视频帖子支持悬浮框多选。
+- Helper 精确匹配 master 中的视频 variant 与音频 rendition，再由 FFmpeg 封装为 MP4。
+- 支持队列、并发限制、取消、失败重试、完成通知和在文件管理器中显示。
+- 扩展弹窗展示 Helper、FFmpeg、下载目录、持久化和最近任务状态。
+- 候选和任务会持久化；Helper 重启时未完成任务会标为可重试。
+- 严格限制为回环 Helper 和 `video.twimg.com` HTTPS playlist。
+
+## 快速开始
+
+前置条件：Go 1.24+、Chromium/Chrome 类浏览器和 FFmpeg。
+
+```bash
+cd helper
+go build -o x-downloader-helper ./cmd/x-downloader-helper
+./x-downloader-helper
 ```
 
-## 当前状态
+另开终端读取配对令牌：
 
-- 插件已实现 XHR 主世界拦截，能识别 HLS master playlist 并强制选择最高画质。
-- 插件会关联帖子 DOM，只展示当前标签页、当前 X 路由捕获的视频；可在“列表”和“帖内”两种显示模式间切换。
-- 列表模式按帖子分组，默认显示五张卡片并支持托盘内滚动；帖内模式在帖子收藏、分享操作栏右侧提供最高画质下载按钮，多视频帖子可弹出缩略图列表并多选下载。
-- 插件弹窗可以启动限定当前 X 标签页的 HLS 诊断会话。
-- Go helper 已实现令牌认证、m3u8 探测、master 展开、音视频配对和诊断报告。
-- 下载任务支持并发限制、去重、取消、FFmpeg 进度、有意义的命名和临时文件原子落盘。
+```bash
+cd helper
+./x-downloader-helper -print-token
+```
 
-完整方案见 [docs/technical-design.md](docs/technical-design.md)。
-诊断操作见 [docs/diagnostic-guide.md](docs/diagnostic-guide.md)。
-下载实测见 [docs/download-guide.md](docs/download-guide.md)。
+然后在 `chrome://extensions` 开启开发者模式，选择“加载已解压的扩展程序”，加载本仓库的 `browser-extension` 目录。打开扩展，填写令牌并点击“保存并检查”。
+
+完整安装、配置和使用步骤见 [用户使用说明](docs/user-guide.md)。实现边界见 [技术设计](docs/technical-design.md)，本地数据说明见 [隐私说明](docs/privacy.md)。
+
+## 默认位置
+
+```text
+下载文件：~/Downloads/X-Media/
+临时文件：~/Downloads/X-Media/.partial/
+令牌：    用户配置目录/x-downloader/token
+状态：    用户配置目录/x-downloader/state/
+```
+
+可复制 [helper/config.example.json](helper/config.example.json) 修改下载目录、FFmpeg 路径、并发数和文件名模板。
+
+## 项目结构
+
+```text
+browser-extension/  Chromium Manifest V3 扩展
+helper/             本地 Go 服务、状态和下载队列
+docs/               用户、隐私与技术文档
+```
 
 ## 本地验证
 
@@ -32,12 +64,14 @@ npm run check
 
 cd ../helper
 go test ./...
-go build -o x-downloader-helper ./cmd/x-downloader-helper
+go test -race ./...
+go vet ./...
+go build ./cmd/x-downloader-helper
 ```
 
-## 加载插件
+## 当前边界
 
-1. 打开 `chrome://extensions`。
-2. 开启“开发者模式”。
-3. 选择“加载已解压的扩展程序”。
-4. 选择本仓库的 `browser-extension` 目录。
+- 只处理用户拥有或获准保存的公开内容，不绕过 DRM、付费或私密访问控制。
+- 当前正式下载针对 master 明确关联的 H.264/AVC 视频和 AAC 音频；单文件 MP4 和其他编码仍需样本扩展。
+- 轮播中的每个视频通常需要切换并播放一次，扩展才能观察到其 master。
+- 当前提供源码构建和“加载已解压扩展”，尚未提供签名安装器、自动启动和自动更新。
