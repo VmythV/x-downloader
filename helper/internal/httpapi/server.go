@@ -7,11 +7,9 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
-	"os"
 	"strings"
 	"time"
 
-	"x-downloader/helper/internal/capture"
 	"x-downloader/helper/internal/jobs"
 	"x-downloader/helper/internal/media"
 )
@@ -45,10 +43,6 @@ type statusResponse struct {
 	Issues         []string       `json:"issues"`
 }
 
-type observationsRequest struct {
-	Observations []capture.Observation `json:"observations"`
-}
-
 type candidateRequest struct {
 	MasterURL string        `json:"masterUrl"`
 	Context   media.Context `json:"context"`
@@ -59,7 +53,7 @@ type createJobRequest struct {
 	VariantID   string `json:"variantId,omitempty"`
 }
 
-func New(version, token string, captures *capture.Store, candidates *media.Store, jobManager *jobs.Manager, readinessValues ...Readiness) http.Handler {
+func New(version, token string, candidates *media.Store, jobManager *jobs.Manager, readinessValues ...Readiness) http.Handler {
 	readiness := Readiness{}
 	if len(readinessValues) > 0 {
 		readiness = readinessValues[0]
@@ -84,43 +78,6 @@ func New(version, token string, captures *capture.Store, candidates *media.Store
 			Status: status, Version: version, APIVersion: APIVersion, Readiness: readiness,
 			CandidateCount: candidates.Count(), Jobs: jobManager.Stats(), Issues: issues,
 		})
-	})))
-	mux.Handle("POST /v1/capture-sessions", requireToken(token, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		session, err := captures.Create()
-		if err != nil {
-			writeError(w, http.StatusInternalServerError, err)
-			return
-		}
-		writeJSON(w, http.StatusCreated, session)
-	})))
-	mux.Handle("GET /v1/capture-sessions/{id}", requireToken(token, http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
-		session, err := captures.Get(request.PathValue("id"))
-		if err != nil {
-			writeStoreError(w, err)
-			return
-		}
-		writeJSON(w, http.StatusOK, session)
-	})))
-	mux.Handle("POST /v1/capture-sessions/{id}/observations", requireToken(token, http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
-		var input observationsRequest
-		if err := decodeJSON(w, request, &input); err != nil {
-			writeError(w, http.StatusBadRequest, err)
-			return
-		}
-		session, err := captures.AddObservations(request.Context(), request.PathValue("id"), input.Observations)
-		if err != nil {
-			writeStoreError(w, err)
-			return
-		}
-		writeJSON(w, http.StatusOK, session)
-	})))
-	mux.Handle("POST /v1/capture-sessions/{id}/finish", requireToken(token, http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
-		report, err := captures.Finish(request.PathValue("id"))
-		if err != nil {
-			writeStoreError(w, err)
-			return
-		}
-		writeJSON(w, http.StatusOK, report)
 	})))
 	mux.Handle("POST /v1/candidates", requireToken(token, http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
 		var input candidateRequest
@@ -220,8 +177,7 @@ func logRequests(next http.Handler) http.Handler {
 			status = http.StatusOK
 		}
 		isPolling := request.Method == http.MethodGet
-		isObservationBatch := strings.HasSuffix(request.URL.Path, "/observations")
-		if (isPolling || isObservationBatch) && status < http.StatusBadRequest {
+		if isPolling && status < http.StatusBadRequest {
 			return
 		}
 		level := slog.LevelInfo
@@ -281,14 +237,6 @@ func decodeJSON(w http.ResponseWriter, request *http.Request, destination any) e
 		return errors.New("request body must contain one JSON value")
 	}
 	return nil
-}
-
-func writeStoreError(w http.ResponseWriter, err error) {
-	if errors.Is(err, os.ErrNotExist) {
-		writeError(w, http.StatusNotFound, errors.New("capture session not found"))
-		return
-	}
-	writeError(w, http.StatusBadRequest, err)
 }
 
 func writeDomainError(w http.ResponseWriter, err error) {

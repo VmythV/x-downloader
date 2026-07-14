@@ -14,7 +14,6 @@ import (
 	"time"
 
 	"x-downloader/helper/internal/auth"
-	"x-downloader/helper/internal/capture"
 	"x-downloader/helper/internal/config"
 	"x-downloader/helper/internal/httpapi"
 	"x-downloader/helper/internal/jobs"
@@ -44,11 +43,10 @@ func main() {
 	}
 	resolvedFFmpeg, ffmpegErr := exec.LookPath(cfg.FFmpegPath)
 	if ffmpegErr != nil {
-		slog.Warn("FFmpeg is not available; diagnostics will work but downloads will fail", "path", cfg.FFmpegPath, "error", ffmpegErr)
+		slog.Warn("FFmpeg is not available; downloads will fail", "path", cfg.FFmpegPath, "error", ffmpegErr)
 	} else {
 		slog.Info("FFmpeg detected", "path", resolvedFFmpeg)
 	}
-	captureStore := capture.NewStore(cfg.DiagnosticsDir, nil)
 	mediaStore, err := media.NewPersistentStore(filepath.Join(cfg.StateDir, "candidates.json"), 300, nil)
 	if err != nil {
 		slog.Error("initialize media store", "error", err)
@@ -76,7 +74,7 @@ func main() {
 
 	server := &http.Server{
 		Addr: cfg.ListenAddress,
-		Handler: httpapi.New(version, token, captureStore, mediaStore, jobManager, httpapi.Readiness{
+		Handler: httpapi.New(version, token, mediaStore, jobManager, httpapi.Readiness{
 			FFmpegReady: ffmpegErr == nil, FFmpegPath: ffmpegPath,
 			DownloadDir: cfg.DownloadDir, DownloadDirWritable: downloadDirWritable,
 			ProxyConfigured: proxyConfigured(), Concurrency: cfg.Concurrency, PersistenceEnabled: true,
@@ -105,7 +103,6 @@ func main() {
 		"address", cfg.ListenAddress,
 		"downloadDir", cfg.DownloadDir,
 		"tempDir", cfg.TempDir,
-		"diagnosticsDir", cfg.DiagnosticsDir,
 		"stateDir", cfg.StateDir,
 		"concurrency", cfg.Concurrency,
 		"ffmpegPath", cfg.FFmpegPath,

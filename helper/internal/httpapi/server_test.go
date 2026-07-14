@@ -1,7 +1,6 @@
 package httpapi
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"io"
@@ -13,7 +12,6 @@ import (
 	"testing"
 	"time"
 
-	"x-downloader/helper/internal/capture"
 	"x-downloader/helper/internal/jobs"
 	"x-downloader/helper/internal/media"
 )
@@ -61,7 +59,7 @@ func newTestHandler(t *testing.T) http.Handler {
 	if err != nil {
 		t.Fatal(err)
 	}
-	return New("test-version", "test-secret-token-value-1234567890", capture.NewStore(filepath.Join(root, "diagnostics"), client), mediaStore, jobManager)
+	return New("test-version", "test-secret-token-value-1234567890", mediaStore, jobManager)
 }
 
 func TestHealth(t *testing.T) {
@@ -86,58 +84,6 @@ func TestStatusReportsAuthenticatedReadiness(t *testing.T) {
 	handler.ServeHTTP(response, request)
 	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `"apiVersion":"1"`) {
 		t.Fatalf("unexpected status response: %d %s", response.Code, response.Body.String())
-	}
-}
-
-func TestCaptureEndpointsRequireToken(t *testing.T) {
-	request := httptest.NewRequest(http.MethodPost, "/v1/capture-sessions", nil)
-	response := httptest.NewRecorder()
-	newTestHandler(t).ServeHTTP(response, request)
-	if response.Code != http.StatusUnauthorized {
-		t.Fatalf("unexpected status: %d", response.Code)
-	}
-}
-
-func TestCreatesCaptureSessionWithToken(t *testing.T) {
-	request := httptest.NewRequest(http.MethodPost, "/v1/capture-sessions", nil)
-	request.Header.Set("Authorization", "Bearer test-secret-token-value-1234567890")
-	response := httptest.NewRecorder()
-	newTestHandler(t).ServeHTTP(response, request)
-	if response.Code != http.StatusCreated || !bytes.Contains(response.Body.Bytes(), []byte(`"status":"active"`)) {
-		t.Fatalf("unexpected response: %d %s", response.Code, response.Body.String())
-	}
-}
-
-func TestCaptureSessionAPIFlow(t *testing.T) {
-	handler := newTestHandler(t)
-	token := "Bearer test-secret-token-value-1234567890"
-
-	createRequest := httptest.NewRequest(http.MethodPost, "/v1/capture-sessions", nil)
-	createRequest.Header.Set("Authorization", token)
-	createResponse := httptest.NewRecorder()
-	handler.ServeHTTP(createResponse, createRequest)
-	var created struct {
-		ID string `json:"id"`
-	}
-	if err := json.Unmarshal(createResponse.Body.Bytes(), &created); err != nil || created.ID == "" {
-		t.Fatalf("decode created session: %v, body=%s", err, createResponse.Body.String())
-	}
-
-	body := `{"observations":[{"url":"https://video.twimg.com/amplify_video/2076268346560196608/pl/mp4a/128000/audio.m3u8"}]}`
-	observeRequest := httptest.NewRequest(http.MethodPost, "/v1/capture-sessions/"+created.ID+"/observations", strings.NewReader(body))
-	observeRequest.Header.Set("Authorization", token)
-	observeResponse := httptest.NewRecorder()
-	handler.ServeHTTP(observeResponse, observeRequest)
-	if observeResponse.Code != http.StatusOK {
-		t.Fatalf("unexpected observation response: %d %s", observeResponse.Code, observeResponse.Body.String())
-	}
-
-	finishRequest := httptest.NewRequest(http.MethodPost, "/v1/capture-sessions/"+created.ID+"/finish", nil)
-	finishRequest.Header.Set("Authorization", token)
-	finishResponse := httptest.NewRecorder()
-	handler.ServeHTTP(finishResponse, finishRequest)
-	if finishResponse.Code != http.StatusOK || !bytes.Contains(finishResponse.Body.Bytes(), []byte(`"mediaId":"2076268346560196608"`)) {
-		t.Fatalf("unexpected finish response: %d %s", finishResponse.Code, finishResponse.Body.String())
 	}
 }
 

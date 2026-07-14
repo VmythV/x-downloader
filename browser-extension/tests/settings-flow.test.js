@@ -157,9 +157,6 @@ test('弹窗的测试操作同时提交地址和 token 供保存', async () => {
         if (message.type === 'helper-settings-get') {
           return { ok: true, result: { baseUrl: 'http://127.0.0.1:17890', token: '' } };
         }
-        if (message.type === 'diagnostic-status') {
-          return { ok: true, result: null };
-        }
         if (message.type === 'helper-settings-test-and-save') {
           return {
             ok: true,
