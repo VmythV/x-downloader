@@ -83,6 +83,18 @@ function statusText(job) {
   }
 }
 
+function localizedJobError(message) {
+  const text = String(message || '未知错误')
+    .replace(/https:\/\/video\.twimg\.com\/[^\s"']+/gi, '<视频地址>');
+  if (/download interrupted because helper restarted/i.test(text)) {
+    return 'Helper 重启中断了下载，可以重试';
+  }
+  if (/ffmpeg/i.test(text) && /not found|executable file|start/i.test(text)) {
+    return 'FFmpeg 不可用，请检查安装或路径';
+  }
+  return text;
+}
+
 function jobButton(label, action, jobId, secondary = false) {
   const button = document.createElement('button');
   button.type = 'button';
@@ -121,7 +133,9 @@ function renderJobs(jobs) {
     row.appendChild(main);
     const detail = document.createElement('div');
     detail.className = 'job-detail';
-    detail.textContent = job.error || `${job.width || '?'}×${job.height || '?'} · ${new Date(job.createdAt).toLocaleString()}`;
+    detail.textContent = job.error
+      ? localizedJobError(job.error)
+      : `${job.width || '?'}×${job.height || '?'} · ${new Date(job.createdAt).toLocaleString()}`;
     detail.title = detail.textContent;
     row.appendChild(detail);
     const actions = document.createElement('div');

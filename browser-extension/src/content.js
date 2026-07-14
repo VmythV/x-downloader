@@ -3,6 +3,9 @@
 
   const EVENT_NAME = 'x-downloader:hls-master';
   const DISPLAY_MODE_KEY = 'mediaDisplayMode';
+  const MAX_CANDIDATES = 250;
+  const MAX_JOBS = 500;
+  const MAX_KNOWN_CAPTURES = 250;
   const trayCore = globalThis.XDownloaderTray;
   if (!trayCore) {
     return;
@@ -25,6 +28,8 @@
   let jobPollTimer = null;
   let inlineRenderTimer = null;
   let displayMode = 'tray';
+  let helperConnected = null;
+  let helperConnectionError = '';
   let currentPageKey = trayCore.pageKey(location.href, location.href);
 
   function candidatesForCurrentPage() {
@@ -42,11 +47,25 @@
   }
 
   async function sendMessage(message) {
-    const response = await chrome.runtime.sendMessage(message);
-    if (!response?.ok) {
-      throw new Error(response?.error || '扩展后台没有响应');
+    const tracksHelper = !['job-notification'].includes(message?.type);
+    try {
+      const response = await chrome.runtime.sendMessage(message);
+      if (!response?.ok) {
+        throw new Error(response?.error || '扩展后台没有响应');
+      }
+      if (tracksHelper) {
+        helperConnected = true;
+        helperConnectionError = '';
+      }
+      return response.result;
+    } catch (error) {
+      if (tracksHelper) {
+        const connectionFailure = /无法连接 Helper|Helper 响应超时|请先配置 Helper|配对令牌无效|扩展后台没有响应/.test(error.message);
+        helperConnected = !connectionFailure;
+        helperConnectionError = connectionFailure ? error.message : '';
+      }
+      throw error;
     }
-    return response.result;
   }
 
   function mediaIDFromAssetUrl(value) {
@@ -147,11 +166,12 @@
   async function updateKnownContexts() {
     for (const [mediaId, capture] of knownCaptures) {
       const context = extractContext(mediaId);
-      if (!context.postId) {
+      const pending = candidates.has(`pending-${mediaId}`);
+      if (!context.postId && !pending) {
         continue;
       }
       const signature = contextSignature(context);
-      if (contextSignatures.get(mediaId) === signature) {
+      if (!pending && contextSignatures.get(mediaId) === signature) {
         continue;
       }
       try {
@@ -184,6 +204,9 @@
         .tray.inline-mode { width: auto; min-width: 275px; }
         .header { display: flex; align-items: center; justify-content: space-between; padding: 10px 12px; background: #15202b; }
         .header strong { font-size: 14px; }
+        .helper-state { display: inline-block; width: 7px; height: 7px; margin-left: 5px; border-radius: 50%; background: #8b98a5; vertical-align: 1px; }
+        .helper-state.ready { background: #00ba7c; }
+        .helper-state.offline { background: #f4212e; }
         .header-actions, .mode-switch { display: flex; align-items: center; gap: 4px; }
         .mode-button { border: 0; border-radius: 999px; padding: 4px 8px; color: #8b98a5; background: transparent; cursor: pointer; font-size: 11px; }
         .mode-button.active { color: white; background: #1d9bf0; }
@@ -206,12 +229,14 @@
         button.cancel { background: #536471; }
         button:disabled { cursor: default; opacity: .55; }
         .empty { padding: 18px; color: #8b98a5; text-align: center; }
+        .detection-note { margin-bottom: 8px; padding: 7px 8px; border-radius: 8px; color: #8b98a5; background: rgba(255,255,255,.04); font-size: 11px; }
+        .detection-note.problem { color: #ff9aa2; background: rgba(244,33,46,.09); }
         .collapsed .cards { display: none; }
         .inline-mode .cards, .inline-mode .toggle { display: none; }
       </style>
       <aside class="tray">
         <div class="header">
-          <strong>X Downloader · <span class="count">0</span></strong>
+          <strong>X Downloader · <span class="count">0</span><span class="helper-state" title="Helper 状态"></span></strong>
           <div class="header-actions">
             <div class="mode-switch">
               <button class="mode-button" data-mode="tray" type="button">列表</button>
@@ -297,7 +322,7 @@
     return {
       candidate,
       job,
-      ...trayCore.inlineDownloadState(candidate, job),
+      ...trayCore.inlineDownloadState(candidate, job ? { ...job, error: localizedJobError(job.error) } : null),
     };
   }
 
@@ -762,14 +787,27 @@
       modeButton.classList.toggle('active', modeButton.dataset.mode === displayMode);
     }
     trayRoot.querySelector('.count').textContent = String(visibleCandidates.length);
+    const helperState = trayRoot.querySelector('.helper-state');
+    helperState.className = `helper-state ${helperConnected === true ? 'ready' : helperConnected === false ? 'offline' : ''}`;
+    helperState.title = helperConnected === true
+      ? 'Helper 已连接'
+      : helperConnected === false ? `Helper 未连接：${helperConnectionError}` : 'Helper 状态未知';
     cardContainer.replaceChildren();
     if (displayMode === 'inline') {
       renderInlineControls(visibleCandidates);
       return;
     }
     clearInlineControls();
+    const note = createTextElement(
+      'div',
+      `detection-note${helperConnected === false ? ' problem' : ''}`,
+      helperConnected === false
+        ? `Helper 未连接：${helperConnectionError || '请启动 Helper 后重试'}`
+        : `已检测 ${visibleCandidates.length} 个视频；多视频帖子请逐个切换并播放。`,
+    );
+    cardContainer.appendChild(note);
     if (visibleCandidates.length === 0) {
-      cardContainer.appendChild(createTextElement('div', 'empty', '当前页面还没有已播放的视频'));
+      cardContainer.appendChild(createTextElement('div', 'empty', '播放视频后，这里会显示可下载内容'));
       sizeTrayForFiveCards(0);
       return;
     }
@@ -826,9 +864,14 @@
         const actions = document.createElement('div');
         actions.className = 'actions';
         const action = downloadButtonState(candidate, job, select.value);
-        const download = createTextElement('button', 'action download', action.label);
+        const pendingRegistration = Boolean(candidate.registrationError);
+        const download = createTextElement(
+          'button',
+          pendingRegistration ? 'action retry-registration' : 'action download',
+          pendingRegistration ? '重试连接' : action.label,
+        );
         download.type = 'button';
-        download.disabled = action.disabled;
+        download.disabled = pendingRegistration ? false : action.disabled;
         actions.appendChild(download);
         if (job && ['queued', 'downloading'].includes(job.status)) {
           const cancel = createTextElement('button', 'action cancel', '取消');
@@ -849,6 +892,41 @@
     return [...jobs.values()]
       .filter((job) => job.candidateId === candidateId && job.variantId === variantId)
       .sort((left, right) => Date.parse(right.createdAt) - Date.parse(left.createdAt))[0] || null;
+  }
+
+  function pruneContentState() {
+    if (knownCaptures.size > MAX_KNOWN_CAPTURES) {
+      for (const mediaId of knownCaptures.keys()) {
+        if (knownCaptures.size <= MAX_KNOWN_CAPTURES) break;
+        knownCaptures.delete(mediaId);
+        contextSignatures.delete(mediaId);
+      }
+    }
+
+    if (candidates.size > MAX_CANDIDATES) {
+      const protectedCandidates = new Set(
+        [...jobs.values()]
+          .filter((job) => ['queued', 'downloading'].includes(job.status))
+          .map((job) => job.candidateId),
+      );
+      const removable = [...candidates.values()]
+        .filter((candidate) => !protectedCandidates.has(candidate.id))
+        .sort((left, right) => (Date.parse(left.discoveredAt || '') || 0) - (Date.parse(right.discoveredAt || '') || 0));
+      for (const candidate of removable) {
+        if (candidates.size <= MAX_CANDIDATES) break;
+        candidates.delete(candidate.id);
+      }
+    }
+
+    if (jobs.size > MAX_JOBS) {
+      const removable = [...jobs.values()]
+        .filter((job) => ['completed', 'failed', 'cancelled'].includes(job.status))
+        .sort((left, right) => Date.parse(left.createdAt || '') - Date.parse(right.createdAt || ''));
+      for (const job of removable) {
+        if (jobs.size <= MAX_JOBS) break;
+        jobs.delete(job.id);
+      }
+    }
   }
 
   function downloadButtonState(candidate, job, variantId) {
@@ -874,10 +952,22 @@
       case 'queued': return '等待下载';
       case 'downloading': return `下载中 ${job.progress?.outTimeSeconds?.toFixed?.(1) || 0}s · ${job.progress?.speed || ''}`;
       case 'completed': return `已完成 · ${job.outputPath?.split('/').pop() || ''}`;
-      case 'failed': return `失败 · ${job.error || '未知错误'}`;
+      case 'failed': return `失败 · ${localizedJobError(job.error)}`;
       case 'cancelled': return '已取消';
       default: return job.status;
     }
+  }
+
+  function localizedJobError(message) {
+    const text = String(message || '未知错误')
+      .replace(/https:\/\/video\.twimg\.com\/[^\s"']+/gi, '<视频地址>');
+    if (/download interrupted because helper restarted/i.test(text)) {
+      return 'Helper 重启中断了下载，可以重试';
+    }
+    if (/ffmpeg/i.test(text) && /not found|executable file|start/i.test(text)) {
+      return 'FFmpeg 不可用，请检查安装或路径';
+    }
+    return text;
   }
 
   async function startDownload(candidateId, variantId) {
@@ -892,6 +982,7 @@
         variantId,
       });
       jobs.set(job.id, job);
+      pruneContentState();
       scheduleJobPoll();
     } catch (error) {
       if (candidate) {
@@ -899,6 +990,27 @@
       }
     }
     renderTray();
+  }
+
+  async function retryRegistration(mediaId) {
+    const capture = knownCaptures.get(mediaId);
+    if (!capture) {
+      return;
+    }
+    const context = extractContext(mediaId);
+    try {
+      const result = await sendMessage({
+        type: 'media-context-updated',
+        masterUrl: capture.masterUrl,
+        context,
+      });
+      if (result?.candidate) {
+        contextSignatures.set(mediaId, contextSignature(context));
+        upsertCandidate(result.candidate);
+      }
+    } catch (error) {
+      upsertPendingCandidate(capture, context, error.message);
+    }
   }
 
   async function startBestDownloads(items) {
@@ -921,6 +1033,7 @@
           variantId: variant.id,
         });
         jobs.set(job.id, job);
+        pruneContentState();
         hasActiveJobs ||= ['queued', 'downloading'].includes(job.status);
       } catch (error) {
         candidate.uiError = error.message;
@@ -936,6 +1049,7 @@
     try {
       const job = await sendMessage({ type: 'job-cancel', jobId });
       jobs.set(job.id, job);
+      pruneContentState();
     } catch (error) {
       const candidate = candidates.get(candidateId);
       if (candidate) {
@@ -958,6 +1072,9 @@
     if (event.target.classList.contains('download')) {
       const variantId = card.querySelector('.variant')?.value || '';
       await startDownload(card.dataset.candidateId, variantId);
+    } else if (event.target.classList.contains('retry-registration')) {
+      const candidate = candidates.get(card.dataset.candidateId);
+      await retryRegistration(candidate?.mediaId || '');
     } else if (event.target.classList.contains('cancel')) {
       await cancelDownload(event.target.dataset.jobId, card.dataset.candidateId);
     }
@@ -979,23 +1096,64 @@
     renderTray();
   }
 
+  function notificationDetail(job) {
+    if (job.status === 'completed') {
+      return job.outputPath?.split(/[\\/]/).pop() || `视频 ${job.mediaId || ''}`;
+    }
+    return localizedJobError(job.error);
+  }
+
+  async function notifyJobTransition(previous, next) {
+    if (!previous || previous.status === next.status || !['completed', 'failed'].includes(next.status)) {
+      return;
+    }
+    const stored = await chrome.storage.local.get('downloadNotifications');
+    if (stored.downloadNotifications === false) {
+      return;
+    }
+    await sendMessage({
+      type: 'job-notification',
+      jobId: next.id,
+      status: next.status,
+      detail: notificationDetail(next),
+    });
+  }
+
+  function syncJobs(items) {
+    const incomingIds = new Set();
+    for (const job of items) {
+      incomingIds.add(job.id);
+      const previous = jobs.get(job.id);
+      jobs.set(job.id, job);
+      notifyJobTransition(previous, job).catch(() => {});
+    }
+    for (const [id, job] of jobs) {
+      if (incomingIds.has(id) || !['queued', 'downloading'].includes(job.status)) {
+        continue;
+      }
+      jobs.set(id, {
+        ...job,
+        status: 'failed',
+        error: 'Helper 重启后未找到该任务，可以重新下载',
+        finishedAt: new Date().toISOString(),
+      });
+    }
+    pruneContentState();
+  }
+
   function scheduleJobPoll() {
     if (jobPollTimer) {
       return;
     }
     jobPollTimer = setTimeout(async () => {
       jobPollTimer = null;
-      let hasActive = false;
-      for (const [id, job] of jobs) {
-        if (!['queued', 'downloading'].includes(job.status)) {
-          continue;
-        }
-        hasActive = true;
-        try {
-          jobs.set(id, await sendMessage({ type: 'job-get', jobId: id }));
-        } catch {
-          // Keep the last known state when helper is temporarily unavailable.
-        }
+      let hasActive = [...jobs.values()].some((job) => ['queued', 'downloading'].includes(job.status));
+      try {
+        const items = await sendMessage({ type: 'job-list' });
+        syncJobs(items);
+        hasActive = items.some((job) => ['queued', 'downloading'].includes(job.status));
+      } catch {
+        // Keep retrying while a locally known task may still be active.
       }
       renderTray();
       if (hasActive) {
@@ -1012,6 +1170,7 @@
       candidates.delete(`pending-${candidate.mediaId}`);
     }
     candidates.set(candidate.id, candidate);
+    pruneContentState();
     renderTray();
   }
 
@@ -1031,6 +1190,7 @@
       registrationError: `helper 未就绪：${errorMessage}`,
       discoveredAt: new Date().toISOString(),
     });
+    pruneContentState();
     renderTray();
   }
 
@@ -1052,6 +1212,7 @@
       }
       capture.mediaId = mediaMatch[1];
       knownCaptures.set(capture.mediaId, capture);
+      pruneContentState();
       const context = extractContext(capture.mediaId);
       const result = await sendMessage({
         type: 'hls-master-captured',
@@ -1108,11 +1269,14 @@
     .catch(() => {});
   sendMessage({ type: 'job-list' })
     .then((items) => {
-      items.forEach((job) => jobs.set(job.id, job));
+      syncJobs(items);
       renderTray();
       if (items.some((job) => ['queued', 'downloading'].includes(job.status))) {
         scheduleJobPoll();
       }
     })
-    .catch(() => {});
+    .catch(() => {
+      renderTray();
+      scheduleContextScan(5000);
+    });
 })();

@@ -13,6 +13,7 @@
   const xhrState = new WeakMap();
   const observedXhrs = new WeakSet();
   const nativeOpen = XMLHttpRequest.prototype.open;
+  const nativeFetch = globalThis.fetch;
 
   function publishCapture(masterUrl, rewrite) {
     const payload = {
@@ -94,5 +95,26 @@
 
     return nativeOpen.apply(this, arguments);
   };
-})();
 
+  if (typeof nativeFetch === 'function') {
+    globalThis.fetch = async function patchedFetch(input) {
+      const response = await nativeFetch.apply(this, arguments);
+      const requestUrl = (() => {
+        try {
+          return new URL(typeof input === 'string' || input instanceof URL ? input : input?.url, location.href).href;
+        } catch {
+          return response.url || '';
+        }
+      })();
+      if (hls.isTwitterHlsUrl(requestUrl) && response.ok) {
+        response.clone().text()
+          .then((text) => hls.rewriteMasterPlaylist(text, requestUrl))
+          .then((rewrite) => {
+            if (rewrite) publishCapture(requestUrl, rewrite);
+          })
+          .catch(() => {});
+      }
+      return response;
+    };
+  }
+})();
